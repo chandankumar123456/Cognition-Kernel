@@ -33,11 +33,16 @@ pub struct Runtime {
     cmd_rx: mpsc::Receiver<RuntimeCommand>,
     cognition_conn: Option<PipeConnection>,
     worker_conn: Option<PipeConnection>,
+    supervisor: Option<crate::supervisor::Supervisor>,
 }
 
 impl Runtime {
     pub fn new(config: KernelConfig, cmd_rx: mpsc::Receiver<RuntimeCommand>) -> Result<Self, Box<dyn std::error::Error>> {
         let store = Store::open(&config.db_path)?;
+        let interrupted = store.mark_interrupted_tasks().unwrap_or(0);
+        if interrupted > 0 {
+            println!("  [kernel] {interrupted} interrupted tasks marked as failed");
+        }
         let event_bus = EventBus::new(256);
         Ok(Self {
             config,
@@ -47,7 +52,12 @@ impl Runtime {
             cmd_rx,
             cognition_conn: None,
             worker_conn: None,
+            supervisor: None,
         })
+    }
+
+    pub fn set_supervisor(&mut self, s: crate::supervisor::Supervisor) {
+        self.supervisor = Some(s);
     }
 
     pub fn event_bus(&self) -> &EventBus {
@@ -114,6 +124,7 @@ impl Runtime {
 
     pub async fn run(&mut self) {
         tracing::info!("runtime loop started");
+        let mut last_health = tokio::time::Instant::now();
         loop {
             let mut channel_closed = false;
             loop {
@@ -131,6 +142,19 @@ impl Runtime {
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => { channel_closed = true; break; }
                 }
+            }
+
+            if last_health.elapsed() > tokio::time::Duration::from_secs(5) {
+                if let Some(sup) = &mut self.supervisor {
+                    let restarted = sup.check_and_restart();
+                    for (wtype, _pid) in restarted {
+                        match wtype {
+                            crate::supervisor::WorkerType::Cognition => { self.cognition_conn = None; }
+                            crate::supervisor::WorkerType::ToolWorker => { self.worker_conn = None; }
+                        }
+                    }
+                }
+                last_health = tokio::time::Instant::now();
             }
 
             let active_ids: Vec<String> = self.tasks.iter()
@@ -179,13 +203,31 @@ impl Runtime {
     }
 
     fn handle_resume_task(&mut self, task_id: &str) {
-        if let Ok(Some(cp)) = self.store.load_latest_checkpoint(task_id) {
-            tracing::info!(task_id = %task_id, step = cp.step_index, "checkpoint loaded for resume");
-            if let Some(task) = self.tasks.get_mut(task_id) {
-                let _ = task.transition_to(TaskStatus::Executing);
-                let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Executing);
-            }
+        let cp = match self.store.load_latest_checkpoint(task_id) {
+            Ok(Some(cp)) => cp,
+            _ => { eprintln!("[resume] no checkpoint for {task_id}"); return; }
+        };
+        let data = match ck_memory::checkpoint::CheckpointData::deserialize(&cp.state_blob) {
+            Ok(d) => d,
+            Err(e) => { eprintln!("[resume] deserialize failed: {e}"); return; }
+        };
+        let Some(plan_json) = &data.plan_json else {
+            eprintln!("[resume] no plan in checkpoint"); return;
+        };
+        let plan = match serde_json::from_str::<crate::task::Plan>(plan_json) {
+            Ok(p) => p,
+            Err(e) => { eprintln!("[resume] plan parse failed: {e}"); return; }
+        };
+        let mut task = crate::task::Task::new(data.goal.clone());
+        let _ = task.transition_to(crate::task::TaskStatus::Planning);
+        let _ = task.set_plan(plan); // -> Planned
+        let _ = task.transition_to(crate::task::TaskStatus::Executing);
+        for _ in 0..data.current_step {
+            task.advance_step();
         }
+        let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Executing);
+        println!("[resume] task {task_id} resumed at step {}", data.current_step);
+        self.tasks.insert(task_id.to_string(), task);
     }
 
     fn handle_cancel_task(&mut self, task_id: &str) {
@@ -265,17 +307,22 @@ impl Runtime {
             if let Some(task) = self.tasks.get_mut(task_id) {
                 if let Err(e) = task.set_plan(plan) {
                     tracing::error!(task_id = %task_id, error = %e, "failed to set plan");
-                } else {
-                    let plan_id = task.plan().map(|p| p.id.clone()).unwrap_or_default();
-                    let step_count = task.plan().map(|p| p.steps.len()).unwrap_or(0);
-                    self.save_checkpoint(task_id);
-                    self.emit(KernelEvent::PlanGenerated {
-                        task_id: task_id.to_string(),
-                        plan_id,
-                        step_count,
-                    });
-                    tracing::info!(task_id = %task_id, "plan received and set");
+                    return;
                 }
+                let plan_id = task.plan().map(|p| p.id.clone()).unwrap_or_default();
+                let step_count = task.plan().map(|p| p.steps.len()).unwrap_or(0);
+                let plan_json = serde_json::to_string(task.plan().unwrap()).ok();
+                // drop mutable borrow of task before calling self methods
+                self.save_checkpoint(task_id);
+                if let Some(pj) = plan_json {
+                    let _ = self.store.update_task_plan(task_id, &pj);
+                }
+                self.emit(KernelEvent::PlanGenerated {
+                    task_id: task_id.to_string(),
+                    plan_id,
+                    step_count,
+                });
+                tracing::info!(task_id = %task_id, "plan received and set");
             }
         } else {
             tracing::error!(task_id = %task_id, "cognition returned no plan");
@@ -363,6 +410,7 @@ impl Runtime {
                 tracing::info!(task_id = %task_id, action_id = %action_id, evidence = %evidence, "verification passed");
                 if let Some(task) = self.tasks.get_mut(task_id) {
                     task.advance_step();
+                    let _ = self.store.update_task_step(task_id, task.current_step() as i64);
                 }
                 self.save_checkpoint(task_id);
                 self.emit(KernelEvent::VerificationPassed {
@@ -373,20 +421,24 @@ impl Runtime {
             }
             VerificationResult::Failed { reason, .. } => {
                 tracing::warn!(task_id = %task_id, action_id = %action_id, reason = %reason, "verification failed");
-                let task = self.tasks.get_mut(task_id).unwrap();
-                let ctx = FailureContext {
-                    task_id: task_id.to_string(),
-                    action_id: action_id.clone(),
-                    reason: reason.clone(),
-                    retry_count: task.retry_count(),
-                    replan_count: task.replan_count(),
+                let (decision, _retry_count, _replan_count) = {
+                    let task = self.tasks.get(task_id).unwrap();
+                    let ctx = FailureContext {
+                        task_id: task_id.to_string(),
+                        action_id: action_id.clone(),
+                        reason: reason.clone(),
+                        retry_count: task.retry_count(),
+                        replan_count: task.replan_count(),
+                    };
+                    let budget = RetryBudget::new(self.config.max_retries, self.config.max_replans);
+                    (RecoveryEngine::decide(&ctx, &budget), task.retry_count(), task.replan_count())
                 };
-                let budget = RetryBudget::new(self.config.max_retries, self.config.max_replans);
-                let decision = RecoveryEngine::decide(&ctx, &budget);
 
                 match decision {
                     RecoveryDecision::Retry { backoff_ms } => {
+                        let task = self.tasks.get_mut(task_id).unwrap();
                         task.increment_retry();
+                        let _ = self.store.update_task_retry_budget(task_id, task.retry_count(), task.replan_count());
                         let attempt = task.retry_count();
                         self.emit(KernelEvent::RecoveryTriggered {
                             task_id: task_id.to_string(),
@@ -397,9 +449,11 @@ impl Runtime {
                         tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
                     }
                     RecoveryDecision::Replan { failure_context } => {
+                        let task = self.tasks.get_mut(task_id).unwrap();
                         task.increment_replan();
                         let attempt = task.replan_count();
                         task.start_replan();
+                        let _ = self.store.update_task_retry_budget(task_id, task.retry_count(), task.replan_count());
                         let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Planning);
                         self.emit(KernelEvent::RecoveryTriggered {
                             task_id: task_id.to_string(),
@@ -409,6 +463,7 @@ impl Runtime {
                         tracing::info!(task_id = %task_id, "replanning: {}", failure_context);
                     }
                     RecoveryDecision::Escalate { reason } => {
+                        let task = self.tasks.get_mut(task_id).unwrap();
                         let _ = task.transition_to(TaskStatus::Verifying);
                         let _ = task.transition_to(TaskStatus::Recovering);
                         let _ = task.transition_to(TaskStatus::Escalated);
@@ -420,11 +475,31 @@ impl Runtime {
                         tracing::error!(task_id = %task_id, reason = %reason, "task escalated");
                     }
                     RecoveryDecision::Rollback { .. } => {
-                        let _ = task.transition_to(TaskStatus::Verifying);
-                        let _ = task.transition_to(TaskStatus::Recovering);
-                        let _ = task.transition_to(TaskStatus::Escalated);
-                        let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Escalated);
-                        tracing::warn!(task_id = %task_id, "rollback not implemented, escalating");
+                        if let Ok(Some(cp)) = self.store.load_latest_checkpoint(task_id) {
+                            if let Ok(data) = ck_memory::checkpoint::CheckpointData::deserialize(&cp.state_blob) {
+                                if let Some(pj) = &data.plan_json {
+                                    if let Ok(plan) = serde_json::from_str::<crate::task::Plan>(pj) {
+                                        if let Some(task) = self.tasks.get_mut(task_id) {
+                                            task.start_replan();
+                                            let _ = task.set_plan(plan);
+                                            for _ in 0..data.current_step { task.advance_step(); }
+                                            let _ = task.transition_to(TaskStatus::Executing);
+                                            let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Executing);
+                                            tracing::info!(task_id = %task_id, step = data.current_step, "rolled back");
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // fallback
+                        if let Some(task) = self.tasks.get_mut(task_id) {
+                            let _ = task.transition_to(TaskStatus::Verifying);
+                            let _ = task.transition_to(TaskStatus::Recovering);
+                            let _ = task.transition_to(TaskStatus::Escalated);
+                            let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Escalated);
+                        }
+                        tracing::warn!(task_id = %task_id, "rollback fallback: escalating");
                     }
                 }
             }

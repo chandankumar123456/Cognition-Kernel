@@ -60,6 +60,7 @@ pub async fn cmd_start(goal: String) {
     // Step 3: Wait for both workers to connect
     println!("Waiting for workers to connect...");
     runtime.await_workers(cog_listener, wrk_listener).await;
+    runtime.set_supervisor(supervisor);
 
     println!("Starting task: {goal}");
     cmd_tx.send(RuntimeCommand::CreateTask { goal }).await.ok();
@@ -67,7 +68,6 @@ pub async fn cmd_start(goal: String) {
 
     runtime.run().await;
     println!("Done.");
-    // supervisor dropped here — kills spawned workers on exit
 }
 
 pub fn cmd_status(task_id: Option<String>) {
