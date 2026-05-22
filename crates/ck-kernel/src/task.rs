@@ -69,6 +69,8 @@ pub struct Task {
     replan_count: u32,
     created_at: i64,
     updated_at: i64,
+    #[serde(default)]
+    pub step_outputs: HashMap<String, String>,
 }
 
 impl Task {
@@ -84,6 +86,7 @@ impl Task {
             replan_count: 0,
             created_at: now,
             updated_at: now,
+            step_outputs: HashMap::new(),
         }
     }
 
@@ -145,5 +148,9 @@ impl Task {
         self.current_step = 0;
         self.status = TaskStatus::Planning;
         self.updated_at = chrono::Utc::now().timestamp_millis();
+    }
+
+    pub fn record_output(&mut self, step_description: &str, output: &str) {
+        self.step_outputs.insert(step_description.to_string(), output.to_string());
     }
 }
