@@ -8,5 +8,10 @@ name = "ck"
 path = "src/main.rs"
 
 [dependencies]
+ck-kernel = { path = "../ck-kernel" }
+ck-events = { path = "../ck-events" }
+ck-memory = { path = "../ck-memory" }
 clap = { version = "4", features = ["derive"] }
 tokio = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
