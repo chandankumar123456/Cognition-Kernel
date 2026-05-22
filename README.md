@@ -8,8 +8,52 @@ The runtime itself is the product. Not the UI. Not the API. Not the prompts.
 
 ---
 
+## Quick Start
+
+**Prerequisites:** Rust 1.75+, Python 3.12+, Go 1.22+
+
+```powershell
+# 1. Clone
+git clone https://github.com/chandankumar123456/Cognition-Kernel.git
+cd "Cognition Kernel"
+
+# 2. Set up Python venv (one time)
+cd cognition
+uv venv .venv
+uv pip install -r requirements.txt
+cd ..
+
+# 3. Build Go worker (one time — ck start also does this automatically)
+cd workers && go build -o bin/ck-worker.exe ./cmd/ck-worker && cd ..
+
+# 4. Set your LLM API key
+$env:OPENAI_API_KEY = "sk-..."   # PowerShell
+# export OPENAI_API_KEY=sk-...   # bash
+
+# 5. Run
+cargo run -p ck-cli -- start "create a file called hello.txt with the content hello world"
+```
+
+That's it. `ck start` spawns the Go worker and Python cognition engine automatically, connects everything, runs the task end-to-end, and exits cleanly.
+
+**Watch live execution in a second terminal:**
+
+```powershell
+cargo run -p ck-cli -- watch
+```
+
+**Check task history:**
+
+```powershell
+cargo run -p ck-cli -- status
+cargo run -p ck-cli -- trace <task-id>
+```
+
+---
+
 ## Table of Contents
 
+- [Quick Start](#quick-start)
 - [What It Is](#what-it-is)
 - [Architecture](#architecture)
 - [Language Allocation](#language-allocation)
@@ -784,75 +828,52 @@ pub struct KernelConfig {
 ### Prerequisites
 
 - **Rust** 1.75+ with cargo
-- **Python** 3.12+ with `uv` or `pip`
+- **Python** 3.12+ with `uv`
 - **Go** 1.22+
-- **pywin32** — Windows Named Pipe support for Python (`pip install pywin32`)
+- **pywin32** — installed automatically via the venv setup below
+
+### One-time setup
+
+**1. Python venv**
+
+```powershell
+cd cognition
+uv venv .venv
+uv pip install -r requirements.txt
+```
+
+This creates `.venv/` with all dependencies (litellm, msgpack, pywin32). The kernel uses `.venv/Scripts/python.exe` automatically — no system Python needed.
+
+**2. Go worker binary**
+
+```powershell
+cd workers
+go build -o bin/ck-worker.exe ./cmd/ck-worker
+```
+
+Or skip this — `ck start` will build it automatically on first run.
 
 ### Rust workspace
 
-```bash
+```powershell
 # Build all crates
 cargo build
 
 # Build release binaries
 cargo build --release
 
-# The kernel binary
-cargo build -p ck-kernel
-
-# The CLI binary
+# CLI binary only
 cargo build -p ck-cli
-# Output: target/debug/ck (or target/release/ck)
-```
-
-### Python cognition engine
-
-```bash
-cd cognition
-
-# With uv (recommended)
-uv sync
-uv run python -m cognition_kernel.engine --pipe \\.\pipe\ck-cognition
-
-# With pip
-pip install -e ".[dev]"
-python -m cognition_kernel.engine --pipe \\.\pipe\ck-cognition
-```
-
-Set your LLM API key before starting:
-
-```bash
-# OpenAI
-export OPENAI_API_KEY=sk-...
-
-# Anthropic
-export ANTHROPIC_API_KEY=sk-ant-...
-
-# Any provider LiteLLM supports
-```
-
-### Go tool workers
-
-```bash
-cd workers
-
-# Build
-go build -o bin/ck-worker ./cmd/ck-worker
-
-# Windows
-go build -o bin/ck-worker.exe ./cmd/ck-worker
-
-# Run
-./bin/ck-worker --pipe \\.\pipe\ck-worker
+# Output: C:\cargo-targets\cognition-kernel\debug\ck.exe
 ```
 
 ### Starting the full system
 
 All components start automatically with a single command:
 
-```bash
+```powershell
 # Set your LLM API key
-export OPENAI_API_KEY=sk-...          # or ANTHROPIC_API_KEY, etc.
+$env:OPENAI_API_KEY = "sk-..."          # or ANTHROPIC_API_KEY, etc.
 
 # Start — spawns Go worker + Python cognition, then runs kernel
 cargo run -p ck-cli -- start "create a file called hello.txt with the content hello world"
@@ -861,14 +882,14 @@ cargo run -p ck-cli -- start "create a file called hello.txt with the content he
 `ck start` automatically:
 1. Builds the Go worker binary if it doesn't exist yet (`workers/bin/ck-worker.exe`)
 2. Spawns the Go tool worker process
-3. Spawns the Python cognition engine process
-4. Connects the kernel to both via Named Pipes
+3. Spawns the Python cognition engine process (using `.venv/Scripts/python.exe`)
+4. Creates pipe endpoints, waits for both workers to connect
 5. Creates and runs the task to completion
 6. Kills worker processes on exit
 
 **Optional — live TUI view (second terminal):**
 
-```bash
+```powershell
 cargo run -p ck-cli -- watch
 ```
 
@@ -1002,6 +1023,20 @@ ck resume 01HX1ABCDEF2345678GHJKM
 - [x] Single command startup — `ck start` auto-spawns all workers
 - [x] Windows Named Pipe IPC — Go (go-winio), Python (pywin32 win32file), Rust (tokio)
 - [x] 38 tests across all layers
+
+**V1.1 — Implemented**
+
+- [x] Real resume from checkpoint (plan + step restored, not just loaded)
+- [x] Rollback restores from last good checkpoint instead of escalating
+- [x] retry_count, replan_count, plan, current_step all persisted to SQLite
+- [x] Supervisor health check every 5s — dead workers restarted, connections reset
+- [x] Interrupted tasks from previous session marked failed on startup (clean slate)
+- [x] Step outputs propagated as `current_state` to LLM on each planning request
+- [x] Filesystem side effects auto-verified post-execution
+- [x] Path sandbox — absolute paths outside `work_dir` blocked before dispatch
+- [x] `ck trace` shows plan steps with ✓/○ completion markers + readable event summaries
+- [x] uv venv setup with `requirements.txt` for reproducible Python environment
+- [x] 9/9 integration tests pass (4 new tests for V1.1 fixes)
 
 **V2 — Planned**
 
