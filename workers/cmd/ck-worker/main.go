@@ -7,15 +7,21 @@ import (
 	"log"
 	"time"
 
+	"github.com/cognition-kernel/workers/internal/browser"
 	"github.com/cognition-kernel/workers/internal/filesystem"
 	"github.com/cognition-kernel/workers/internal/ipc"
 	"github.com/cognition-kernel/workers/internal/shell"
 	"github.com/cognition-kernel/workers/pkg/protocol"
 )
 
+var globalWorkDir string
+
 func main() {
 	pipe := flag.String("pipe", "", "IPC pipe address to connect to")
+	workDir := flag.String("workdir", ".", "Project root directory")
 	flag.Parse()
+
+	globalWorkDir = *workDir
 
 	if *pipe == "" {
 		log.Fatal("--pipe flag is required")
@@ -91,6 +97,16 @@ func dispatch(req *protocol.ExecutionRequest) *protocol.ExecutionResponse {
 				path, _ = v.(string)
 			}
 			resp.SideEffects = []string{fmt.Sprintf("%s:%s", action, path)}
+		}
+
+	case "browser":
+		operation, _ := req.Params["operation"].(string)
+		r := browser.Execute(operation, req.Params, globalWorkDir)
+		resp.Output = r.Output
+		resp.Success = r.Success
+		if !r.Success {
+			errMsg := r.Output
+			resp.Error = &errMsg
 		}
 
 	default:
