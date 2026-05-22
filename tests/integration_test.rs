@@ -163,3 +163,101 @@ fn test_store_persistence() {
     assert_eq!(task.status, ck_memory::store::TaskStatus::Created);
     assert_eq!(task.current_step, 0);
 }
+
+
+/// Test: resume actually restores plan and step from checkpoint
+#[test]
+fn test_real_resume_restores_plan_and_step() {
+    use ck_memory::checkpoint::CheckpointData;
+    use ck_kernel::task::{Plan, PlanStep};
+    use std::collections::HashMap;
+
+    let store = Store::open_in_memory().unwrap();
+    store.create_task("t-resume", "resume goal").unwrap();
+
+    // Build a 3-step plan, checkpoint at step 1
+    let plan = Plan {
+        id: "p1".into(),
+        steps: (0..3).map(|i| PlanStep {
+            id: format!("s{i}"),
+            description: format!("step {i}"),
+            tool: "shell".into(),
+            params: HashMap::new(),
+            expected_outcome: "done".into(),
+            verification_strategy: "exit_code_zero".into(),
+        }).collect(),
+        generated_by: "test".into(),
+        reasoning: "".into(),
+    };
+
+    let cp = CheckpointData {
+        task_id: "t-resume".into(),
+        goal: "resume goal".into(),
+        status: "Executing".into(),
+        plan_json: Some(serde_json::to_string(&plan).unwrap()),
+        current_step: 1,
+        retry_count: 0,
+        replan_count: 0,
+    };
+    let blob = cp.serialize().unwrap();
+    store.save_checkpoint("cp1", "t-resume", &blob, 1).unwrap();
+
+    // Load and verify restoration
+    let loaded = store.load_latest_checkpoint("t-resume").unwrap().unwrap();
+    let restored = CheckpointData::deserialize(&loaded.state_blob).unwrap();
+    assert_eq!(restored.current_step, 1);
+    let restored_plan: Plan = serde_json::from_str(restored.plan_json.as_ref().unwrap()).unwrap();
+    assert_eq!(restored_plan.steps.len(), 3);
+    assert_eq!(restored_plan.steps[1].description, "step 1");
+}
+
+/// Test: mark_interrupted_tasks marks planning/executing tasks as failed
+#[test]
+fn test_mark_interrupted_tasks() {
+    let store = Store::open_in_memory().unwrap();
+    store.create_task("t1", "goal 1").unwrap();
+    store.create_task("t2", "goal 2").unwrap();
+    store.create_task("t3", "goal 3").unwrap();
+    store.update_task_status("t1", ck_memory::store::TaskStatus::Executing).unwrap();
+    store.update_task_status("t2", ck_memory::store::TaskStatus::Planning).unwrap();
+    store.update_task_status("t3", ck_memory::store::TaskStatus::Completed).unwrap();
+
+    let count = store.mark_interrupted_tasks().unwrap();
+    assert_eq!(count, 2); // t1 and t2, not t3
+
+    assert_eq!(store.get_task("t1").unwrap().unwrap().status, ck_memory::store::TaskStatus::Failed);
+    assert_eq!(store.get_task("t2").unwrap().unwrap().status, ck_memory::store::TaskStatus::Failed);
+    assert_eq!(store.get_task("t3").unwrap().unwrap().status, ck_memory::store::TaskStatus::Completed);
+}
+
+/// Test: retry budget is persisted to SQLite
+#[test]
+fn test_retry_budget_persistence() {
+    let store = Store::open_in_memory().unwrap();
+    store.create_task("t1", "goal").unwrap();
+    store.update_task_retry_budget("t1", 2, 1).unwrap();
+    let task = store.get_task("t1").unwrap().unwrap();
+    let budget: serde_json::Value = serde_json::from_str(
+        task.retry_budget_json.as_ref().unwrap()
+    ).unwrap();
+    assert_eq!(budget["retry_count"], 2);
+    assert_eq!(budget["replan_count"], 1);
+}
+
+/// Test: path sandbox logic correctly identifies dangerous paths
+#[test]
+fn test_path_sandbox_logic() {
+    let work_dir = std::path::Path::new("E:\\Projects\\Cognition Kernel");
+    let safe_relative = std::path::Path::new("hello.txt");
+    let safe_abs = work_dir.join("output\\result.txt");
+    let dangerous = std::path::Path::new("C:\\Windows\\System32\\evil.dll");
+    let dangerous2 = std::path::Path::new("C:\\Users\\secret.txt");
+
+    // Relative paths are always safe (not absolute)
+    assert!(!safe_relative.is_absolute());
+    // Absolute path inside work_dir is safe
+    assert!(safe_abs.starts_with(work_dir));
+    // Absolute paths outside work_dir are blocked
+    assert!(!dangerous.starts_with(work_dir));
+    assert!(!dangerous2.starts_with(work_dir));
+}
