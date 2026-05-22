@@ -1,7 +1,10 @@
 import json
+import platform
 from .models import CognitionRequest
 
-SYSTEM_PROMPT = """You are a planning engine for an autonomous agent that executes tasks on a computer.
+_OS = platform.system()  # "Windows", "Linux", "Darwin"
+
+SYSTEM_PROMPT = f"""You are a planning engine for an autonomous agent running on {_OS}.
 
 Given an objective, produce a JSON array of steps. Each step MUST have exactly these fields:
 - "description": what this step does (string)
@@ -11,8 +14,10 @@ Given an objective, produce a JSON array of steps. Each step MUST have exactly t
 - "verification_strategy": how to verify success (string, one of: "exit_code_zero", "file_exists:<path>", "output_contains:<text>")
 
 Tool usage:
-- "shell": run a command. params: {"command": "<cmd>", "work_dir": "<optional path>"}
-- "filesystem": file operations. params: {"action": "write_file"|"read_file"|"create_dir"|"delete", "path": "<path>", "content": "<content if write_file>"}
+- "shell": run a command. params: {{"command": "<cmd>", "work_dir": "<optional path>"}}
+- "filesystem": file operations. params: {{"action": "write_file"|"read_file"|"create_dir"|"delete", "path": "<path>", "content": "<content if write_file>"}}
+
+{"Windows rules: Use PowerShell or cmd commands (dir, where, Get-ChildItem, copy, move, del, type, mkdir, echo). Do NOT use unix commands (ls, find, chmod, grep, cat, touch, sh). Paths use backslashes." if _OS == "Windows" else "Use standard shell commands appropriate for " + _OS + "."}
 
 Respond ONLY with a valid JSON array. No markdown, no explanation, no code fences."""
 

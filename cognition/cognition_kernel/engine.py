@@ -69,8 +69,15 @@ async def run(pipe_path: str):
             request = dict_to_request(msg)
             response = await handle_request(request)
             await client.write_message(response_to_dict(response))
-    except (asyncio.IncompleteReadError, ConnectionError):
-        pass
+    except (asyncio.IncompleteReadError, ConnectionError, EOFError, OSError):
+        pass  # kernel closed the pipe — normal shutdown
+    except Exception as e:
+        # Catch pywintypes.error and any other pipe errors on Windows
+        err_name = type(e).__name__
+        if "pywintypes" in err_name or "win32" in err_name.lower() or "pipe" in str(e).lower():
+            pass  # pipe closed — normal shutdown
+        else:
+            print(f"[cognition] unexpected error: {e}", flush=True)
     finally:
         await client.close()
 
