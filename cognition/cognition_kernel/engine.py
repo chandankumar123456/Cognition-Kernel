@@ -1,7 +1,11 @@
 import argparse
 import asyncio
 import sys
+import os
 from dataclasses import asdict
+
+# Suppress LiteLLM's noisy startup warnings about optional AWS dependencies
+os.environ.setdefault("LITELLM_LOG", "ERROR")
 
 from .models import CognitionRequest, CognitionResponse
 from .planner import generate_plan
