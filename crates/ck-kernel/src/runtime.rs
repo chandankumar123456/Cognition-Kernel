@@ -254,6 +254,12 @@ impl Runtime {
         let _ = task.transition_to(TaskStatus::Planning);
         let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Planning);
 
+        let current_state: HashMap<String, serde_json::Value> = task
+            .step_outputs
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+
         let Some(conn) = self.cognition_conn.as_mut() else {
             tracing::warn!(task_id = %task_id, "no cognition connection, task stays in Planning");
             return;
@@ -263,7 +269,7 @@ impl Runtime {
             request_type: "plan".into(),
             task_id: task_id.to_string(),
             objective,
-            current_state: HashMap::new(),
+            current_state,
             memory_context: HashMap::new(),
             failure_context: None,
         };
