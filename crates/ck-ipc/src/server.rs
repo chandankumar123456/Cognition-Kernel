@@ -17,12 +17,26 @@ impl PipeServer {
         &self.pipe_name
     }
 
-    pub async fn accept(&self) -> Result<PipeConnection, ProtocolError> {
+    /// Create the pipe endpoint (makes it visible to clients) and return a
+    /// listener that can be awaited separately from spawning workers.
+    pub fn listen(&self) -> Result<PipeListener, ProtocolError> {
         let server = ServerOptions::new()
-            .first_pipe_instance(false)
+            .first_pipe_instance(true)
             .create(&self.pipe_name)?;
-        server.connect().await?;
-        Ok(PipeConnection { pipe: server })
+        Ok(PipeListener { server })
+    }
+}
+
+/// A created but not yet connected pipe endpoint. Workers can now see and
+/// connect to the pipe. Call `accept()` to wait for the first client.
+pub struct PipeListener {
+    server: NamedPipeServer,
+}
+
+impl PipeListener {
+    pub async fn accept(self) -> Result<PipeConnection, ProtocolError> {
+        self.server.connect().await?;
+        Ok(PipeConnection { pipe: self.server })
     }
 }
 

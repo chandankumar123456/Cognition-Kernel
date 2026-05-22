@@ -54,6 +54,31 @@ impl Supervisor {
         Ok(pid)
     }
 
+    /// Spawn cognition engine as a Python module (`python -m cognition_kernel.engine`)
+    /// from the given working directory. This avoids relative import errors.
+    pub fn spawn_cognition_module(&mut self, python_path: &str, work_dir: &str, pipe_name: &str) -> io::Result<u32> {
+        let args = vec![
+            "-m".to_string(),
+            "cognition_kernel.engine".to_string(),
+            "--pipe".to_string(),
+            pipe_name.to_string(),
+        ];
+        let child = Command::new(python_path)
+            .args(&args)
+            .current_dir(work_dir)
+            .spawn()?;
+        let pid = child.id();
+        self.workers.insert(WorkerType::Cognition, WorkerProcess {
+            worker_type: WorkerType::Cognition,
+            child,
+            command: python_path.to_string(),
+            args,
+            restart_count: 0,
+            max_restarts: 3,
+        });
+        Ok(pid)
+    }
+
     pub fn spawn_tool_worker(&mut self, binary_path: &str, pipe_name: &str) -> io::Result<u32> {
         let args = vec!["--pipe".to_string(), pipe_name.to_string()];
         let child = Command::new(binary_path).args(&args).spawn()?;

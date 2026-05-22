@@ -54,14 +54,50 @@ impl Runtime {
         &self.event_bus
     }
 
+    /// Create pipe endpoints (making them visible to clients) and return listeners.
+    /// Call this BEFORE spawning workers, then call `await_workers` after spawning.
+    pub fn listen(&self) -> Result<(ck_ipc::server::PipeListener, ck_ipc::server::PipeListener), ck_ipc::protocol::ProtocolError> {
+        let cog = PipeServer::new(&self.config.cognition_pipe).listen()?;
+        let wrk = PipeServer::new(&self.config.worker_pipe).listen()?;
+        Ok((cog, wrk))
+    }
+
+    /// Wait for both workers to connect to already-listening pipe endpoints.
+    pub async fn await_workers(
+        &mut self,
+        cog_listener: ck_ipc::server::PipeListener,
+        wrk_listener: ck_ipc::server::PipeListener,
+    ) {
+        let timeout = tokio::time::Duration::from_secs(10);
+        let (cog_result, wrk_result) = tokio::join!(
+            tokio::time::timeout(timeout, cog_listener.accept()),
+            tokio::time::timeout(timeout, wrk_listener.accept()),
+        );
+        match cog_result {
+            Ok(Ok(conn)) => { tracing::info!("cognition connected"); self.cognition_conn = Some(conn); }
+            Ok(Err(e)) => tracing::warn!("cognition connect failed: {e}"),
+            Err(_) => tracing::warn!("cognition connect timed out"),
+        }
+        match wrk_result {
+            Ok(Ok(conn)) => { tracing::info!("worker connected"); self.worker_conn = Some(conn); }
+            Ok(Err(e)) => tracing::warn!("worker connect failed: {e}"),
+            Err(_) => tracing::warn!("worker connect timed out"),
+        }
+    }
+
     pub async fn connect_workers(&mut self, cognition_pipe: &str, worker_pipe: &str) {
         let cog_server = PipeServer::new(cognition_pipe);
         let wrk_server = PipeServer::new(worker_pipe);
-        let timeout = tokio::time::Duration::from_secs(5);
+        let timeout = tokio::time::Duration::from_secs(10);
+
+        let (cog_listener, wrk_listener) = match (cog_server.listen(), wrk_server.listen()) {
+            (Ok(c), Ok(w)) => (c, w),
+            (Err(e), _) | (_, Err(e)) => { tracing::warn!("failed to create pipe endpoints: {e}"); return; }
+        };
 
         let (cog_result, wrk_result) = tokio::join!(
-            tokio::time::timeout(timeout, cog_server.accept()),
-            tokio::time::timeout(timeout, wrk_server.accept()),
+            tokio::time::timeout(timeout, cog_listener.accept()),
+            tokio::time::timeout(timeout, wrk_listener.accept()),
         );
 
         match cog_result {
@@ -69,7 +105,6 @@ impl Runtime {
             Ok(Err(e)) => tracing::warn!("cognition connect failed: {e}"),
             Err(_) => tracing::warn!("cognition connect timed out"),
         }
-
         match wrk_result {
             Ok(Ok(conn)) => { tracing::info!("worker connected"); self.worker_conn = Some(conn); }
             Ok(Err(e)) => tracing::warn!("worker connect failed: {e}"),

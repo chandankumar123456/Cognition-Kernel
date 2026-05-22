@@ -22,11 +22,24 @@ pub async fn cmd_start(goal: String) {
         }
     }
 
+    let (cmd_tx, cmd_rx) = mpsc::channel(16);
+    let mut runtime = match Runtime::new(config.clone(), cmd_rx) {
+        Ok(r) => r,
+        Err(e) => { eprintln!("Failed to create runtime: {e}"); return; }
+    };
+
+    // Step 1: Create pipe endpoints FIRST so workers can find them on connect
+    println!("Opening pipe endpoints...");
+    let (cog_listener, wrk_listener) = match runtime.listen() {
+        Ok(l) => l,
+        Err(e) => { eprintln!("Failed to create pipes: {e}"); return; }
+    };
+
+    // Step 2: Spawn workers — pipes now exist for them to connect to
     let pipe_prefix = r"\\.\pipe\";
     let cognition_pipe_path = format!("{}{}", pipe_prefix, config.cognition_pipe);
     let worker_pipe_path = format!("{}{}", pipe_prefix, config.worker_pipe);
 
-    // Spawn workers
     let mut supervisor = Supervisor::new("ck");
     println!("Spawning Go worker...");
     match supervisor.spawn_tool_worker(&config.worker_bin, &worker_pipe_path) {
@@ -34,22 +47,19 @@ pub async fn cmd_start(goal: String) {
         Err(e) => { eprintln!("Failed to spawn worker: {e}"); return; }
     }
     println!("Spawning Python cognition...");
-    match supervisor.spawn_cognition(&config.python_bin, &config.cognition_script, &cognition_pipe_path) {
+    // Run as module (-m) from the cognition directory to fix relative imports
+    let cognition_dir = std::path::Path::new(&config.cognition_script)
+        .parent().and_then(|p| p.parent())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "cognition".into());
+    match supervisor.spawn_cognition_module(&config.python_bin, &cognition_dir, &cognition_pipe_path) {
         Ok(pid) => println!("  Cognition PID: {pid}"),
         Err(e) => { eprintln!("Failed to spawn cognition: {e}"); return; }
     }
 
-    // Give workers a moment to start before the kernel tries to connect
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-    let (cmd_tx, cmd_rx) = mpsc::channel(16);
-    let mut runtime = match Runtime::new(config.clone(), cmd_rx) {
-        Ok(r) => r,
-        Err(e) => { eprintln!("Failed to create runtime: {e}"); return; }
-    };
-
-    println!("Connecting to workers...");
-    runtime.connect_workers(&config.cognition_pipe, &config.worker_pipe).await;
+    // Step 3: Wait for both workers to connect
+    println!("Waiting for workers to connect...");
+    runtime.await_workers(cog_listener, wrk_listener).await;
 
     println!("Starting task: {goal}");
     cmd_tx.send(RuntimeCommand::CreateTask { goal }).await.ok();
