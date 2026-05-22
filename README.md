@@ -1038,12 +1038,22 @@ ck resume 01HX1ABCDEF2345678GHJKM
 - [x] uv venv setup with `requirements.txt` for reproducible Python environment
 - [x] 9/9 integration tests pass (4 new tests for V1.1 fixes)
 
+**V1.2 — Implemented**
+
+- [x] Action outputs persisted to SQLite `actions` table
+- [x] `ck status <id>` shows command output previews (tool, duration, output)
+- [x] `ck trace <id>` shows action outputs inline with events
+- [x] Failure context passed to LLM on replan requests (`request_type: "replan"`)
+- [x] Playwright browser tool worker via Python bridge (navigate, screenshot, click, fill_form)
+- [x] Daemon mode — `ck daemon` starts kernel in background, `ck stop` shuts it down
+- [x] OS-aware system prompt (Windows: PowerShell/cmd; Linux: sh)
+- [x] 10 critical/high bugs fixed: sandbox escape, nil slice deserialization, replan handler, resume ID mismatch, timestamp consistency, daemon worker lifecycle, pipe reconnect after crash
+
 **V2 — Planned**
 
-- [ ] Daemon mode (kernel runs in background, CLI communicates via IPC)
-- [ ] Browser tool worker (Playwright)
 - [ ] Desktop tool worker (screen capture, input simulation)
 - [ ] Long-term memory (vector search for task history)
 - [ ] Config file support (`cognition-kernel.toml`)
 - [ ] `ck approve` / `ck reject` for escalated tasks
-- [ ] Linux/Mac Named Pipe → Unix socket fallback in production
+- [ ] Linux/Mac Unix socket fallback
+- [ ] Multi-task parallelism (spawn step_task per task)
