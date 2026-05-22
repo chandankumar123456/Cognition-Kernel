@@ -36,3 +36,23 @@ async def generate_plan(request: CognitionRequest, model: str = "gpt-4o-mini") -
         )
         for s in steps_data
     ]
+
+
+
+async def generate_next_step(request: CognitionRequest, model: str = "gpt-4o-mini") -> dict:
+    """Generate the next single step (or declare done). Returns raw dict."""
+    import litellm
+    from .context import STEP_PROMPT, build_step_prompt
+
+    prompt = build_step_prompt(request)
+    response = await litellm.acompletion(
+        model=model,
+        messages=[
+            {"role": "system", "content": STEP_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    content = response.choices[0].message.content.strip()
+    if content.startswith("```"):
+        content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    return json.loads(content)

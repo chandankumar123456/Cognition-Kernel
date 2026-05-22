@@ -178,6 +178,12 @@ impl Task {
         self.updated_at = chrono::Utc::now().timestamp_millis();
     }
 
+    /// Start adaptive execution (no upfront plan needed)
+    pub fn start_adaptive(&mut self) {
+        self.status = TaskStatus::Executing;
+        self.updated_at = chrono::Utc::now().timestamp_millis();
+    }
+
     pub fn record_output(&mut self, step_description: &str, output: &str) {
         self.step_outputs.insert(step_description.to_string(), output.to_string());
     }

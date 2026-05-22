@@ -32,6 +32,38 @@ def build_plan_prompt(request: CognitionRequest) -> str:
     return "\n".join(parts)
 
 
+STEP_PROMPT = f"""You are an autonomous agent running on {_OS}. You execute tasks one step at a time.
+
+Given an objective and the history of steps already taken (with their outputs), decide the NEXT single action to take.
+
+If the objective is ALREADY ACHIEVED based on the step history, respond with:
+{{"done": true, "reasoning": "<why the objective is complete>"}}
+
+Otherwise, respond with ONE step:
+{{"done": false, "step": {{"description": "...", "tool": "shell"|"filesystem"|"browser", "params": {{...}}, "expected_outcome": "...", "verification_strategy": "exit_code_zero"|"file_exists:<path>"|"output_contains:<text>"}}}}
+
+Tool usage:
+- "shell": params: {{"command": "<cmd>"}}
+- "filesystem": params: {{"action": "write_file"|"read_file"|"create_dir"|"delete", "path": "<path>", "content": "<if write>"}}
+- "browser": params: {{"operation": "navigate_and_extract"|"screenshot"|"click"|"fill_form", "url": "<url>", ...}}
+
+{"Windows: Use PowerShell/cmd (dir, Get-ChildItem, type, echo, mkdir). NO unix commands." if _OS == "Windows" else "Use standard " + _OS + " commands."}
+
+Respond with ONLY valid JSON. No markdown, no explanation."""
+
+
+def build_step_prompt(request: CognitionRequest) -> str:
+    parts = [f"Objective: {request.objective}"]
+    if request.current_state:
+        parts.append("\nStep history (what has been done so far):")
+        for desc, output in request.current_state.items():
+            output_str = str(output)[:500]
+            parts.append(f"  - {desc}: {output_str}")
+    if request.failure_context:
+        parts.append(f"\nLast failure: {json.dumps(request.failure_context)}")
+    return "\n".join(parts)
+
+
 def build_replan_prompt(request: CognitionRequest) -> str:
     return (
         f"Objective: {request.objective}\n"

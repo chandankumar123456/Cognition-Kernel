@@ -37,6 +37,31 @@ async def handle_request(request: CognitionRequest) -> CognitionResponse:
                 response_type="plan",
                 plan=[asdict(s) for s in steps],
             )
+        elif request.request_type == "step":
+            from .planner import generate_next_step
+            from .models import PlanStep
+            result = await generate_next_step(request)
+            if result.get("done"):
+                return CognitionResponse(
+                    task_id=request.task_id,
+                    response_type="done",
+                    plan=None,
+                    reasoning=result.get("reasoning", "objective achieved"),
+                )
+            else:
+                step = result.get("step", {})
+                return CognitionResponse(
+                    task_id=request.task_id,
+                    response_type="step",
+                    plan=[asdict(PlanStep(
+                        description=step.get("description", ""),
+                        tool=step.get("tool", "shell"),
+                        params=step.get("params", {}),
+                        expected_outcome=step.get("expected_outcome", ""),
+                        verification_strategy=step.get("verification_strategy", "exit_code_zero"),
+                    ))],
+                    reasoning="",
+                )
         elif request.request_type == "reflect":
             reasoning = await reflect(request)
             return CognitionResponse(

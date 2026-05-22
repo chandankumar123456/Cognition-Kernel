@@ -268,8 +268,21 @@ impl Runtime {
     async fn step_task(&mut self, task_id: &str) {
         let Some(task) = self.tasks.get(task_id) else { return };
         match task.status() {
-            TaskStatus::Created => self.request_plan(task_id).await,
-            TaskStatus::Planned | TaskStatus::Executing => self.execute_next_step(task_id).await,
+            TaskStatus::Created => {
+                // Adaptive mode: skip upfront planning, go straight to executing
+                if let Some(task) = self.tasks.get_mut(task_id) {
+                    task.start_adaptive();
+                    let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Executing);
+                }
+            }
+            TaskStatus::Planned | TaskStatus::Executing => {
+                let has_plan = self.tasks.get(task_id).map(|t| t.plan().is_some()).unwrap_or(false);
+                if has_plan {
+                    self.execute_next_step(task_id).await;
+                } else {
+                    self.execute_adaptive(task_id).await;
+                }
+            }
             _ => {}
         }
     }
@@ -370,6 +383,229 @@ impl Runtime {
             tracing::error!(task_id = %task_id, "cognition returned no plan");
             if let Some(task) = self.tasks.get_mut(task_id) {
                 let _ = task.transition_to(TaskStatus::Failed);
+            }
+        }
+    }
+
+    async fn execute_adaptive(&mut self, task_id: &str) {
+        let Some(task) = self.tasks.get_mut(task_id) else { return };
+
+        // Ask cognition for the next step
+        let Some(conn) = self.cognition_conn.as_mut() else {
+            tracing::error!(task_id = %task_id, "no cognition connection");
+            if let Some(task) = self.tasks.get_mut(task_id) {
+                let _ = task.transition_to(TaskStatus::Failed);
+                let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Failed);
+            }
+            return;
+        };
+
+        let current_state: HashMap<String, serde_json::Value> = task
+            .step_outputs
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+        let objective = task.goal().to_string();
+        let failure_context = task.last_failure.as_ref().map(|f| {
+            let mut m = HashMap::new();
+            m.insert("reason".to_string(), serde_json::Value::String(f.clone()));
+            m
+        });
+
+        let request = CognitionRequest {
+            request_type: "step".into(),
+            task_id: task_id.to_string(),
+            objective,
+            current_state,
+            memory_context: HashMap::new(),
+            failure_context,
+        };
+
+        if let Err(e) = conn.write(&request).await {
+            tracing::error!(task_id = %task_id, error = %e, "failed to send step request");
+            if let Some(task) = self.tasks.get_mut(task_id) {
+                let _ = task.transition_to(TaskStatus::Failed);
+            }
+            return;
+        }
+
+        let response: CognitionResponse = match conn.read().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(task_id = %task_id, error = %e, "failed to read step response");
+                if let Some(task) = self.tasks.get_mut(task_id) {
+                    let _ = task.transition_to(TaskStatus::Failed);
+                }
+                return;
+            }
+        };
+
+        // Handle "done" — task is complete
+        if response.response_type == "done" {
+            if let Some(task) = self.tasks.get_mut(task_id) {
+                let _ = task.transition_to(TaskStatus::Verifying);
+                let _ = task.transition_to(TaskStatus::Completed);
+                let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Completed);
+                let steps = task.current_step();
+                self.save_checkpoint(task_id);
+                self.emit(KernelEvent::TaskCompleted {
+                    task_id: task_id.to_string(),
+                    duration_ms: 0,
+                    steps_executed: steps,
+                });
+                println!("  [task] completed: {}", response.reasoning);
+            }
+            return;
+        }
+
+        // Handle error
+        if response.response_type == "error" {
+            eprintln!("  [cognition] error: {}", response.reasoning);
+            if let Some(task) = self.tasks.get_mut(task_id) {
+                let _ = task.transition_to(TaskStatus::Failed);
+                let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Failed);
+            }
+            return;
+        }
+
+        // Handle "step" — execute the returned step
+        let Some(ipc_steps) = response.plan else {
+            tracing::error!(task_id = %task_id, "step response has no plan");
+            return;
+        };
+        let Some(ipc_step) = ipc_steps.first() else { return };
+        let step = ipc_step_to_plan_step(ipc_step);
+
+        let step_num = self.tasks.get(task_id).map(|t| t.current_step()).unwrap_or(0) + 1;
+        println!("  [step {}] [{}] {}", step_num, step.tool, step.description);
+
+        // Path sandbox check
+        let work_dir = std::path::Path::new(&self.config.work_dir);
+        for (key, val) in &step.params {
+            if key == "path" || key == "work_dir" {
+                if let Some(path_str) = val.as_str() {
+                    let path = std::path::Path::new(path_str);
+                    let resolved = if path.is_absolute() { path.to_path_buf() } else { work_dir.join(path) };
+                    let is_safe = if let Ok(canon) = resolved.canonicalize() {
+                        canon.starts_with(work_dir)
+                    } else {
+                        !path_str.contains("..")
+                    };
+                    if !is_safe {
+                        eprintln!("  [sandbox] BLOCKED: '{}'", path_str);
+                        if let Some(task) = self.tasks.get_mut(task_id) {
+                            let _ = task.transition_to(TaskStatus::Failed);
+                            let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Failed);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Execute via worker
+        let action_id = Ulid::new().to_string();
+        self.emit(KernelEvent::ActionDispatched {
+            task_id: task_id.to_string(),
+            action_id: action_id.clone(),
+            tool: step.tool.clone(),
+            timestamp: chrono::Utc::now().timestamp_millis(),
+        });
+
+        let Some(conn) = self.worker_conn.as_mut() else {
+            tracing::error!(task_id = %task_id, "no worker connection");
+            if let Some(task) = self.tasks.get_mut(task_id) {
+                let _ = task.transition_to(TaskStatus::Failed);
+                let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Failed);
+            }
+            return;
+        };
+
+        let exec_request = ExecutionRequest {
+            task_id: task_id.to_string(),
+            action_id: action_id.clone(),
+            tool: step.tool.clone(),
+            params: step.params.clone(),
+            timeout_ms: self.config.default_timeout_ms,
+        };
+
+        if let Err(e) = conn.write(&exec_request).await {
+            tracing::error!(task_id = %task_id, error = %e, "worker write failed");
+            if let Some(task) = self.tasks.get_mut(task_id) {
+                let _ = task.transition_to(TaskStatus::Failed);
+            }
+            return;
+        }
+
+        let exec_response: ExecutionResponse = match conn.read().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(task_id = %task_id, error = %e, "worker read failed");
+                if let Some(task) = self.tasks.get_mut(task_id) {
+                    let _ = task.transition_to(TaskStatus::Failed);
+                }
+                return;
+            }
+        };
+
+        // Record the output
+        let output_preview = if exec_response.output.len() > 200 {
+            format!("{}...", &exec_response.output[..200])
+        } else {
+            exec_response.output.clone()
+        };
+        println!("    output: {}", output_preview.replace('\n', " | "));
+
+        if let Some(task) = self.tasks.get_mut(task_id) {
+            task.record_output(&step.description, &exec_response.output);
+            task.advance_step();
+            let _ = self.store.update_task_step(task_id, task.current_step() as i64);
+        }
+
+        // Save action to DB
+        let result_json = serde_json::json!({
+            "output": exec_response.output,
+            "success": exec_response.success,
+            "duration_ms": exec_response.duration_ms
+        }).to_string();
+        let params_json = serde_json::to_string(&step.params).unwrap_or_default();
+        let step_index = self.tasks.get(task_id).map(|t| t.current_step() as i64 - 1).unwrap_or(0);
+        let _ = self.store.save_action(
+            &action_id, task_id, step_index,
+            &step.tool, &params_json, &result_json,
+            exec_response.success, exec_response.duration_ms,
+        );
+
+        self.save_checkpoint(task_id);
+
+        // If the step failed, record failure for next LLM call
+        if !exec_response.success {
+            if let Some(task) = self.tasks.get_mut(task_id) {
+                let err_msg = exec_response.error.as_deref().unwrap_or("unknown error");
+                task.set_failure(&format!("step '{}' failed: {}", step.description, err_msg));
+            }
+        } else {
+            if let Some(task) = self.tasks.get_mut(task_id) {
+                task.last_failure = None;
+            }
+        }
+
+        self.emit(KernelEvent::ActionCompleted {
+            task_id: task_id.to_string(),
+            action_id,
+            success: exec_response.success,
+            duration_ms: exec_response.duration_ms,
+        });
+
+        // Max steps safety limit (prevent infinite loops)
+        if let Some(task) = self.tasks.get(task_id) {
+            if task.current_step() > 20 {
+                eprintln!("  [safety] max 20 steps reached, stopping task");
+                if let Some(task) = self.tasks.get_mut(task_id) {
+                    let _ = task.transition_to(TaskStatus::Verifying);
+                    let _ = task.transition_to(TaskStatus::Completed);
+                    let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Completed);
+                }
             }
         }
     }
