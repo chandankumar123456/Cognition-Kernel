@@ -1048,6 +1048,10 @@ ck resume 01HX1ABCDEF2345678GHJKM
 - [x] Daemon mode — `ck daemon` starts kernel in background, `ck stop` shuts it down
 - [x] OS-aware system prompt (Windows: PowerShell/cmd; Linux: sh)
 - [x] 10 critical/high bugs fixed: sandbox escape, nil slice deserialization, replan handler, resume ID mismatch, timestamp consistency, daemon worker lifecycle, pipe reconnect after crash
+- [x] **Adaptive step-by-step execution** — LLM sees output of each step before deciding the next action (no more blind static plans)
+- [x] LLM declares "done" when objective is achieved (no fixed step count)
+- [x] Max 20 steps safety limit prevents infinite loops
+- [x] Step outputs printed live during execution for user visibility
 
 **V2 — Planned**
 
