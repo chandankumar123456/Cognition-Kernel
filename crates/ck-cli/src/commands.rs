@@ -108,10 +108,28 @@ pub fn cmd_status(task_id: Option<String>) {
     match task_id {
         Some(id) => match store.get_task(&id) {
             Ok(Some(task)) => {
-                println!("Task: {}", task.id);
-                println!("  Goal:   {}", task.goal);
-                println!("  Status: {}", task.status.as_str());
-                println!("  Step:   {}", task.current_step);
+                println!("Task:   {}", task.id);
+                println!("Goal:   {}", task.goal);
+                println!("Status: {} (step {})", task.status.as_str(), task.current_step);
+
+                if let Ok(actions) = store.get_task_actions(&id) {
+                    if !actions.is_empty() {
+                        println!("\nActions:");
+                        for a in &actions {
+                            let result: serde_json::Value = serde_json::from_str(&a.result_json).unwrap_or_default();
+                            let output = result["output"].as_str().unwrap_or("").trim();
+                            let status = if a.success { "ok  " } else { "FAIL" };
+                            println!("  [{}] step {} [{}] {}ms",
+                                status, a.step_index, a.tool, a.duration_ms);
+                            if !output.is_empty() {
+                                let preview: String = output.chars().take(500).collect();
+                                for line in preview.lines().take(15) {
+                                    println!("    {}", line);
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Ok(None) => eprintln!("Task not found: {id}"),
             Err(e) => eprintln!("Error: {e}"),
@@ -175,6 +193,26 @@ pub fn cmd_trace(task_id: String) {
             }
         }
         Err(e) => eprintln!("Error: {e}"),
+    }
+
+    // Show action outputs
+    if let Ok(actions) = store.get_task_actions(&task_id) {
+        if !actions.is_empty() {
+            println!("\nAction Outputs:");
+            for a in &actions {
+                let result: serde_json::Value = serde_json::from_str(&a.result_json).unwrap_or_default();
+                let output = result["output"].as_str().unwrap_or("").trim();
+                let icon = if a.success { "v" } else { "x" };
+                println!("  [{}] step {} [{}] {}ms",
+                    icon, a.step_index, a.tool, a.duration_ms);
+                if !output.is_empty() {
+                    let preview: String = output.chars().take(500).collect();
+                    for line in preview.lines().take(15) {
+                        println!("      {}", line);
+                    }
+                }
+            }
+        }
     }
 }
 
