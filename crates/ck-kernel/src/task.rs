@@ -138,4 +138,12 @@ impl Task {
             None => false,
         }
     }
+
+    /// Reset task to Planning state for replanning. Only valid from Recovering.
+    pub fn start_replan(&mut self) {
+        self.plan = None;
+        self.current_step = 0;
+        self.status = TaskStatus::Planning;
+        self.updated_at = chrono::Utc::now().timestamp_millis();
+    }
 }

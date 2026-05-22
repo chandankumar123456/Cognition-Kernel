@@ -55,44 +55,46 @@ impl Runtime {
     }
 
     pub async fn connect_workers(&mut self, cognition_pipe: &str, worker_pipe: &str) {
-        // Connect to cognition engine
-        let cognition_server = PipeServer::new(cognition_pipe);
-        match cognition_server.accept().await {
-            Ok(conn) => {
-                tracing::info!(pipe = %cognition_pipe, "cognition engine connected");
-                self.cognition_conn = Some(conn);
-            }
-            Err(e) => {
-                tracing::warn!(pipe = %cognition_pipe, error = %e, "failed to connect cognition engine, running without");
-            }
+        let cog_server = PipeServer::new(cognition_pipe);
+        let wrk_server = PipeServer::new(worker_pipe);
+        let timeout = tokio::time::Duration::from_secs(5);
+
+        let (cog_result, wrk_result) = tokio::join!(
+            tokio::time::timeout(timeout, cog_server.accept()),
+            tokio::time::timeout(timeout, wrk_server.accept()),
+        );
+
+        match cog_result {
+            Ok(Ok(conn)) => { tracing::info!("cognition connected"); self.cognition_conn = Some(conn); }
+            Ok(Err(e)) => tracing::warn!("cognition connect failed: {e}"),
+            Err(_) => tracing::warn!("cognition connect timed out"),
         }
 
-        // Connect to worker
-        let worker_server = PipeServer::new(worker_pipe);
-        match worker_server.accept().await {
-            Ok(conn) => {
-                tracing::info!(pipe = %worker_pipe, "tool worker connected");
-                self.worker_conn = Some(conn);
-            }
-            Err(e) => {
-                tracing::warn!(pipe = %worker_pipe, error = %e, "failed to connect tool worker, running without");
-            }
+        match wrk_result {
+            Ok(Ok(conn)) => { tracing::info!("worker connected"); self.worker_conn = Some(conn); }
+            Ok(Err(e)) => tracing::warn!("worker connect failed: {e}"),
+            Err(_) => tracing::warn!("worker connect timed out"),
         }
     }
 
     pub async fn run(&mut self) {
         tracing::info!("runtime loop started");
         loop {
-            while let Ok(cmd) = self.cmd_rx.try_recv() {
-                match cmd {
-                    RuntimeCommand::CreateTask { goal } => self.handle_create_task(goal),
-                    RuntimeCommand::PauseTask { task_id } => self.handle_pause_task(&task_id),
-                    RuntimeCommand::ResumeTask { task_id } => self.handle_resume_task(&task_id),
-                    RuntimeCommand::CancelTask { task_id } => self.handle_cancel_task(&task_id),
-                    RuntimeCommand::Shutdown => {
-                        tracing::info!("shutdown received");
-                        return;
-                    }
+            let mut channel_closed = false;
+            loop {
+                match self.cmd_rx.try_recv() {
+                    Ok(cmd) => match cmd {
+                        RuntimeCommand::CreateTask { goal } => self.handle_create_task(goal),
+                        RuntimeCommand::PauseTask { task_id } => self.handle_pause_task(&task_id),
+                        RuntimeCommand::ResumeTask { task_id } => self.handle_resume_task(&task_id),
+                        RuntimeCommand::CancelTask { task_id } => self.handle_cancel_task(&task_id),
+                        RuntimeCommand::Shutdown => {
+                            tracing::info!("shutdown received");
+                            return;
+                        }
+                    },
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => { channel_closed = true; break; }
                 }
             }
 
@@ -106,7 +108,13 @@ impl Runtime {
             }
 
             // Remove terminal tasks
-            self.tasks.retain(|_, t| !matches!(t.status(), TaskStatus::Completed | TaskStatus::Failed));
+            self.tasks.retain(|_, t| !matches!(t.status(), TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Escalated));
+
+            // Auto-shutdown when all tasks done and command channel closed
+            if self.tasks.is_empty() && channel_closed {
+                tracing::info!("all tasks complete and command channel closed, shutting down");
+                return;
+            }
 
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }
@@ -116,7 +124,7 @@ impl Runtime {
         let task = Task::new(goal.clone());
         let task_id = task.id().to_string();
         let _ = self.store.create_task(&task_id, &goal);
-        self.event_bus.emit(KernelEvent::TaskCreated {
+        self.emit(KernelEvent::TaskCreated {
             task_id: task_id.clone(),
             goal,
             timestamp: chrono::Utc::now().timestamp_millis(),
@@ -217,7 +225,7 @@ impl Runtime {
                     let plan_id = task.plan().map(|p| p.id.clone()).unwrap_or_default();
                     let step_count = task.plan().map(|p| p.steps.len()).unwrap_or(0);
                     self.save_checkpoint(task_id);
-                    self.event_bus.emit(KernelEvent::PlanGenerated {
+                    self.emit(KernelEvent::PlanGenerated {
                         task_id: task_id.to_string(),
                         plan_id,
                         step_count,
@@ -242,7 +250,7 @@ impl Runtime {
             let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Completed);
             let steps_executed = self.tasks.get(task_id).map(|t| t.current_step()).unwrap_or(0);
             self.save_checkpoint(task_id);
-            self.event_bus.emit(KernelEvent::TaskCompleted {
+            self.emit(KernelEvent::TaskCompleted {
                 task_id: task_id.to_string(),
                 duration_ms: 0,
                 steps_executed,
@@ -260,7 +268,7 @@ impl Runtime {
         let step = task.current_plan_step().cloned();
         let Some(step) = step else { return };
 
-        self.event_bus.emit(KernelEvent::ActionDispatched {
+        self.emit(KernelEvent::ActionDispatched {
             task_id: task_id.to_string(),
             action_id: action_id.clone(),
             tool: step.tool.clone(),
@@ -313,7 +321,7 @@ impl Runtime {
                     task.advance_step();
                 }
                 self.save_checkpoint(task_id);
-                self.event_bus.emit(KernelEvent::VerificationPassed {
+                self.emit(KernelEvent::VerificationPassed {
                     task_id: task_id.to_string(),
                     action_id,
                     evidence,
@@ -335,45 +343,43 @@ impl Runtime {
                 match decision {
                     RecoveryDecision::Retry { backoff_ms } => {
                         task.increment_retry();
-                        self.event_bus.emit(KernelEvent::RecoveryTriggered {
+                        let attempt = task.retry_count();
+                        self.emit(KernelEvent::RecoveryTriggered {
                             task_id: task_id.to_string(),
                             strategy: "retry".into(),
-                            attempt: task.retry_count(),
+                            attempt,
                         });
                         tracing::info!(task_id = %task_id, backoff_ms, "retrying after backoff");
-                        // Backoff handled by not advancing — next tick will re-dispatch
                         tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
                     }
                     RecoveryDecision::Replan { failure_context } => {
                         task.increment_replan();
-                        let _ = task.transition_to(TaskStatus::Verifying);
-                        let _ = task.transition_to(TaskStatus::Recovering);
-                        let _ = task.transition_to(TaskStatus::Planned);
-                        let _ = task.transition_to(TaskStatus::Executing);
-                        // Transition back to Planning for replan
-                        // The FSM requires specific paths; go through valid transitions
-                        tracing::info!(task_id = %task_id, "replanning due to: {}", failure_context);
-                        self.event_bus.emit(KernelEvent::RecoveryTriggered {
+                        let attempt = task.replan_count();
+                        task.start_replan();
+                        let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Planning);
+                        self.emit(KernelEvent::RecoveryTriggered {
                             task_id: task_id.to_string(),
                             strategy: "replan".into(),
-                            attempt: task.replan_count(),
+                            attempt,
                         });
+                        tracing::info!(task_id = %task_id, "replanning: {}", failure_context);
                     }
                     RecoveryDecision::Escalate { reason } => {
                         let _ = task.transition_to(TaskStatus::Verifying);
                         let _ = task.transition_to(TaskStatus::Recovering);
                         let _ = task.transition_to(TaskStatus::Escalated);
-                        self.event_bus.emit(KernelEvent::TaskFailed {
+                        let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Escalated);
+                        self.emit(KernelEvent::TaskFailed {
                             task_id: task_id.to_string(),
                             reason: reason.clone(),
                         });
                         tracing::error!(task_id = %task_id, reason = %reason, "task escalated");
                     }
                     RecoveryDecision::Rollback { .. } => {
-                        // Rollback not yet implemented, escalate instead
                         let _ = task.transition_to(TaskStatus::Verifying);
                         let _ = task.transition_to(TaskStatus::Recovering);
                         let _ = task.transition_to(TaskStatus::Escalated);
+                        let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Escalated);
                         tracing::warn!(task_id = %task_id, "rollback not implemented, escalating");
                     }
                 }
@@ -395,10 +401,18 @@ impl Runtime {
         let blob = data.serialize().unwrap_or_default();
         let cp_id = Ulid::new().to_string();
         let _ = self.store.save_checkpoint(&cp_id, task_id, &blob, task.current_step() as i64);
-        self.event_bus.emit(KernelEvent::CheckpointSaved {
+        self.emit(KernelEvent::CheckpointSaved {
             task_id: task_id.to_string(),
             checkpoint_id: cp_id,
         });
+    }
+
+    fn emit(&self, event: KernelEvent) {
+        let task_id = event_task_id(&event);
+        let event_type = event_type_name(&event);
+        let payload = serde_json::to_string(&event).unwrap_or_default();
+        let _ = self.store.append_event(task_id, event_type, &payload);
+        self.event_bus.emit(event);
     }
 }
 
@@ -410,6 +424,40 @@ fn ipc_step_to_plan_step(s: &IpcPlanStep) -> PlanStep {
         params: s.params.clone(),
         expected_outcome: s.expected_outcome.clone(),
         verification_strategy: s.verification_strategy.clone(),
+    }
+}
+
+fn event_task_id(event: &KernelEvent) -> &str {
+    match event {
+        KernelEvent::TaskCreated { task_id, .. } => task_id,
+        KernelEvent::PlanGenerated { task_id, .. } => task_id,
+        KernelEvent::ActionDispatched { task_id, .. } => task_id,
+        KernelEvent::ActionCompleted { task_id, .. } => task_id,
+        KernelEvent::VerificationPassed { task_id, .. } => task_id,
+        KernelEvent::VerificationFailed { task_id, .. } => task_id,
+        KernelEvent::RecoveryTriggered { task_id, .. } => task_id,
+        KernelEvent::TaskCompleted { task_id, .. } => task_id,
+        KernelEvent::TaskFailed { task_id, .. } => task_id,
+        KernelEvent::CheckpointSaved { task_id, .. } => task_id,
+        KernelEvent::WorkerSpawned { .. } => "kernel",
+        KernelEvent::WorkerCrashed { .. } => "kernel",
+    }
+}
+
+fn event_type_name(event: &KernelEvent) -> &'static str {
+    match event {
+        KernelEvent::TaskCreated { .. } => "TaskCreated",
+        KernelEvent::PlanGenerated { .. } => "PlanGenerated",
+        KernelEvent::ActionDispatched { .. } => "ActionDispatched",
+        KernelEvent::ActionCompleted { .. } => "ActionCompleted",
+        KernelEvent::VerificationPassed { .. } => "VerificationPassed",
+        KernelEvent::VerificationFailed { .. } => "VerificationFailed",
+        KernelEvent::RecoveryTriggered { .. } => "RecoveryTriggered",
+        KernelEvent::TaskCompleted { .. } => "TaskCompleted",
+        KernelEvent::TaskFailed { .. } => "TaskFailed",
+        KernelEvent::CheckpointSaved { .. } => "CheckpointSaved",
+        KernelEvent::WorkerSpawned { .. } => "WorkerSpawned",
+        KernelEvent::WorkerCrashed { .. } => "WorkerCrashed",
     }
 }
 

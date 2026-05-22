@@ -33,6 +33,8 @@ async fn watch_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     db_path: &str,
 ) -> io::Result<()> {
+    let store = Store::open(db_path).ok();
+
     loop {
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
@@ -44,13 +46,13 @@ async fn watch_loop(
             }
         }
 
-        let (tasks, events) = match Store::open(db_path) {
-            Ok(store) => {
-                let tasks = store.list_tasks().unwrap_or_default();
-                let events = store.recent_events(20).unwrap_or_default();
+        let (tasks, events) = match &store {
+            Some(s) => {
+                let tasks = s.list_tasks().unwrap_or_default();
+                let events = s.recent_events(20).unwrap_or_default();
                 (tasks, events)
             }
-            Err(_) => (vec![], vec![]),
+            None => (vec![], vec![]),
         };
 
         terminal.draw(|f| {
