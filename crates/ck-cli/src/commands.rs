@@ -113,23 +113,59 @@ pub fn cmd_trace(task_id: String) {
     let config = KernelConfig::default();
     let store = match Store::open(&config.db_path) {
         Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to open store: {e}");
-            return;
-        }
+        Err(e) => { eprintln!("Failed to open store: {e}"); return; }
     };
 
+    // Show the plan if available
+    if let Ok(Some(task)) = store.get_task(&task_id) {
+        println!("Task: {} | Status: {} | Step: {}", &task_id[..task_id.len().min(12)], task.status.as_str(), task.current_step);
+        println!("Goal: {}", task.goal);
+        if let Some(plan_json) = &task.plan_json {
+            if let Ok(plan) = serde_json::from_str::<serde_json::Value>(plan_json) {
+                if let Some(steps) = plan["steps"].as_array() {
+                    println!("\nPlan ({} steps):", steps.len());
+                    for (i, step) in steps.iter().enumerate() {
+                        let desc = step["description"].as_str().unwrap_or("?");
+                        let tool = step["tool"].as_str().unwrap_or("?");
+                        let marker = if (i as i64) < task.current_step { "\u{2713}" } else { "o" };
+                        println!("  {} Step {}: [{}] {}", marker, i + 1, tool, desc);
+                    }
+                    println!();
+                }
+            }
+        }
+    }
+
+    // Show events
     match store.replay_events(&task_id) {
-        Ok(events) if events.is_empty() => println!("No events found for task: {task_id}"),
+        Ok(events) if events.is_empty() => println!("No events found."),
         Ok(events) => {
-            println!("Trace for task: {task_id}");
-            for ev in events {
+            println!("Events ({}):", events.len());
+            for ev in &events {
                 let ts = chrono::DateTime::from_timestamp(ev.timestamp, 0)
                     .map(|dt: chrono::DateTime<chrono::Utc>| dt.format("%H:%M:%S").to_string())
                     .unwrap_or_else(|| ev.timestamp.to_string());
-                println!("  [{ts}] {}: {}", ev.event_type, ev.payload_json);
+                let summary = summarize_event(&ev.event_type, &ev.payload_json);
+                println!("  [{}] {} {}", ts, ev.event_type, summary);
             }
         }
-        Err(e) => eprintln!("Error replaying events: {e}"),
+        Err(e) => eprintln!("Error: {e}"),
+    }
+}
+
+fn summarize_event(event_type: &str, payload_json: &str) -> String {
+    let v = match serde_json::from_str::<serde_json::Value>(payload_json) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    let inner = v.get(event_type).unwrap_or(&v);
+    match event_type {
+        "ActionDispatched" => format!("-> tool={}", inner["tool"].as_str().unwrap_or("?")),
+        "VerificationPassed" => format!("ok {}", inner["evidence"].as_str().unwrap_or("")),
+        "VerificationFailed" => format!("FAIL {}", inner["reason"].as_str().unwrap_or("")),
+        "RecoveryTriggered" => format!("retry {} attempt={}", inner["strategy"].as_str().unwrap_or("?"), inner["attempt"]),
+        "TaskCompleted" => format!("DONE steps={}", inner["steps_executed"]),
+        "TaskFailed" => format!("FAIL {}", inner["reason"].as_str().unwrap_or("")),
+        _ => String::new(),
     }
 }
