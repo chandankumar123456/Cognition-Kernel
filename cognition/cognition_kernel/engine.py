@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import sys
 from dataclasses import asdict
 
 from .models import CognitionRequest, CognitionResponse
@@ -65,6 +66,10 @@ def main():
     parser = argparse.ArgumentParser(description="Cognition Kernel Engine")
     parser.add_argument("--pipe", required=True, help="Path to named pipe")
     args = parser.parse_args()
+
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
     asyncio.run(run(args.pipe))
 
 
