@@ -359,6 +359,25 @@ impl Runtime {
         let step = task.current_plan_step().cloned();
         let Some(step) = step else { return };
 
+        // Path sandbox: block absolute paths outside work_dir
+        let work_dir = std::path::Path::new(&self.config.work_dir);
+        for (key, val) in &step.params {
+            if key == "path" || key == "work_dir" {
+                if let Some(path_str) = val.as_str() {
+                    let path = std::path::Path::new(path_str);
+                    if path.is_absolute() && !path.starts_with(work_dir) {
+                        eprintln!("  [sandbox] BLOCKED: '{}' is outside allowed dir '{}'",
+                            path_str, self.config.work_dir);
+                        if let Some(task) = self.tasks.get_mut(task_id) {
+                            let _ = task.transition_to(TaskStatus::Failed);
+                            let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Failed);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+
         self.emit(KernelEvent::ActionDispatched {
             task_id: task_id.to_string(),
             action_id: action_id.clone(),
@@ -411,6 +430,23 @@ impl Runtime {
                 if let Some(task) = self.tasks.get_mut(task_id) {
                     task.advance_step();
                     let _ = self.store.update_task_step(task_id, task.current_step() as i64);
+                }
+                if let Some(task) = self.tasks.get_mut(task_id) {
+                    task.record_output(&step.description, &response.output);
+                }
+                // Auto-check any side effects reported by the worker
+                for side_effect in &response.side_effects {
+                    if let Some(path) = side_effect.strip_prefix("write_file:").or_else(|| side_effect.strip_prefix("create_dir:")) {
+                        let strat = ck_verify::strategies::VerificationStrategy::FileExists {
+                            path: std::path::PathBuf::from(path),
+                            content_contains: None,
+                        };
+                        if let ck_verify::strategies::VerificationResult::Failed { reason, .. } =
+                            ck_verify::engine::Verifier::verify_strategy(&strat)
+                        {
+                            tracing::warn!(path = %path, reason = %reason, "side effect file not found after action");
+                        }
+                    }
                 }
                 self.save_checkpoint(task_id);
                 self.emit(KernelEvent::VerificationPassed {
