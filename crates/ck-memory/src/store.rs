@@ -76,6 +76,19 @@ pub struct CheckpointRecord {
     pub created_at: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ActionRecord {
+    pub id: String,
+    pub task_id: String,
+    pub step_index: i64,
+    pub tool: String,
+    pub params_json: String,
+    pub result_json: String,
+    pub success: bool,
+    pub duration_ms: u64,
+    pub created_at: i64,
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -280,5 +293,38 @@ impl Store {
             Some(r) => Ok(Some(r?)),
             None => Ok(None),
         }
+    }
+
+    pub fn save_action(
+        &self, id: &str, task_id: &str, step_index: i64, tool: &str,
+        params_json: &str, result_json: &str, success: bool, duration_ms: u64,
+    ) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT INTO actions (id, task_id, step_index, tool, params_json, result_json, success, duration_ms, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![id, task_id, step_index, tool, params_json, result_json, success as i64, duration_ms as i64, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_task_actions(&self, task_id: &str) -> rusqlite::Result<Vec<ActionRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, step_index, tool, params_json, result_json, success, duration_ms, created_at FROM actions WHERE task_id = ?1 ORDER BY step_index ASC",
+        )?;
+        let rows = stmt.query_map(params![task_id], |row| {
+            Ok(ActionRecord {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                step_index: row.get(2)?,
+                tool: row.get(3)?,
+                params_json: row.get(4)?,
+                result_json: row.get(5)?,
+                success: row.get::<_, i64>(6)? != 0,
+                duration_ms: row.get::<_, i64>(7)? as u64,
+                created_at: row.get(8)?,
+            })
+        })?;
+        rows.collect()
     }
 }

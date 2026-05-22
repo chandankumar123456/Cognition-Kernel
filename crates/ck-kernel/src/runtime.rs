@@ -494,6 +494,24 @@ impl Runtime {
                     let failure_msg = format!("step '{}' [{}] failed: {}", step.description, step.tool, reason);
                     task.set_failure(&failure_msg);
                 }
+                let result_json = serde_json::json!({
+                    "output": response.output,
+                    "error": response.error,
+                    "success": false,
+                    "duration_ms": response.duration_ms
+                }).to_string();
+                let params_json = serde_json::to_string(&step.params).unwrap_or_default();
+                let step_index = self.tasks.get(task_id).map(|t| t.current_step() as i64).unwrap_or(0);
+                let _ = self.store.save_action(
+                    &action_id,
+                    task_id,
+                    step_index,
+                    &step.tool,
+                    &params_json,
+                    &result_json,
+                    false,
+                    response.duration_ms,
+                );
                 let (decision, _retry_count, _replan_count) = {
                     let task = self.tasks.get(task_id).unwrap();
                     let ctx = FailureContext {
