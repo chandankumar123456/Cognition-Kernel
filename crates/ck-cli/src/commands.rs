@@ -67,7 +67,32 @@ pub async fn cmd_start(goal: String) {
     drop(cmd_tx);
 
     runtime.run().await;
-    println!("Done.");
+
+    // Show what happened to the task
+    if let Ok(store) = Store::open(&config.db_path) {
+        if let Ok(tasks) = store.list_tasks() {
+            // Find the most recently created task
+            if let Some(task) = tasks.first() {
+                let icon = match task.status {
+                    ck_memory::store::TaskStatus::Completed => "✓",
+                    ck_memory::store::TaskStatus::Failed => "✗",
+                    ck_memory::store::TaskStatus::Escalated => "⚠",
+                    _ => "?",
+                };
+                println!("{} Task {} — {} (step {}/{})",
+                    icon,
+                    &task.id[..task.id.len().min(12)],
+                    task.status.as_str(),
+                    task.current_step,
+                    task.plan_json.as_ref()
+                        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                        .and_then(|v| v["steps"].as_array().map(|s| s.len()))
+                        .unwrap_or(0)
+                );
+                println!("  Run `ck trace {}` to see what happened.", &task.id[..task.id.len().min(12)]);
+            }
+        }
+    }
 }
 
 pub fn cmd_status(task_id: Option<String>) {
