@@ -10,3 +10,7 @@ workers/bin/
 *.db-shm
 .idea/
 .vscode/
+
+
+
+C:/cargo-targets/
