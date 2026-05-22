@@ -18,6 +18,7 @@ impl WorkerType {
 }
 
 struct WorkerProcess {
+    #[allow(dead_code)]
     worker_type: WorkerType,
     child: Child,
     command: String,
@@ -28,6 +29,7 @@ struct WorkerProcess {
 
 pub struct Supervisor {
     workers: HashMap<WorkerType, WorkerProcess>,
+    #[allow(dead_code)]
     pipe_prefix: String,
 }
 
