@@ -260,18 +260,28 @@ impl Runtime {
             .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
             .collect();
 
+        let failure_context = if task.replan_count() > 0 {
+            task.last_failure.as_ref().map(|f| {
+                let mut m = HashMap::new();
+                m.insert("reason".to_string(), serde_json::Value::String(f.clone()));
+                m
+            })
+        } else {
+            None
+        };
+
         let Some(conn) = self.cognition_conn.as_mut() else {
             tracing::warn!(task_id = %task_id, "no cognition connection, task stays in Planning");
             return;
         };
 
         let request = CognitionRequest {
-            request_type: "plan".into(),
+            request_type: if task.replan_count() > 0 { "replan".into() } else { "plan".into() },
             task_id: task_id.to_string(),
             objective,
             current_state,
             memory_context: HashMap::new(),
-            failure_context: None,
+            failure_context,
         };
 
         if let Err(e) = conn.write(&request).await {
@@ -440,6 +450,23 @@ impl Runtime {
                 if let Some(task) = self.tasks.get_mut(task_id) {
                     task.record_output(&step.description, &response.output);
                 }
+                let result_json = serde_json::json!({
+                    "output": response.output,
+                    "success": response.success,
+                    "duration_ms": response.duration_ms
+                }).to_string();
+                let params_json = serde_json::to_string(&step.params).unwrap_or_default();
+                let step_index = self.tasks.get(task_id).map(|t| t.current_step() as i64 - 1).unwrap_or(0);
+                let _ = self.store.save_action(
+                    &action_id,
+                    task_id,
+                    step_index,
+                    &step.tool,
+                    &params_json,
+                    &result_json,
+                    true,
+                    response.duration_ms,
+                );
                 // Auto-check any side effects reported by the worker
                 for side_effect in &response.side_effects {
                     if let Some(path) = side_effect.strip_prefix("write_file:").or_else(|| side_effect.strip_prefix("create_dir:")) {
@@ -463,6 +490,10 @@ impl Runtime {
             }
             VerificationResult::Failed { reason, .. } => {
                 tracing::warn!(task_id = %task_id, action_id = %action_id, reason = %reason, "verification failed");
+                if let Some(task) = self.tasks.get_mut(task_id) {
+                    let failure_msg = format!("step '{}' [{}] failed: {}", step.description, step.tool, reason);
+                    task.set_failure(&failure_msg);
+                }
                 let (decision, _retry_count, _replan_count) = {
                     let task = self.tasks.get(task_id).unwrap();
                     let ctx = FailureContext {

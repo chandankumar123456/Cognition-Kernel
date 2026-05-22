@@ -71,6 +71,8 @@ pub struct Task {
     updated_at: i64,
     #[serde(default)]
     pub step_outputs: HashMap<String, String>,
+    #[serde(default)]
+    pub last_failure: Option<String>,
 }
 
 impl Task {
@@ -87,6 +89,7 @@ impl Task {
             created_at: now,
             updated_at: now,
             step_outputs: HashMap::new(),
+            last_failure: None,
         }
     }
 
@@ -152,5 +155,9 @@ impl Task {
 
     pub fn record_output(&mut self, step_description: &str, output: &str) {
         self.step_outputs.insert(step_description.to_string(), output.to_string());
+    }
+
+    pub fn set_failure(&mut self, reason: &str) {
+        self.last_failure = Some(reason.to_string());
     }
 }
