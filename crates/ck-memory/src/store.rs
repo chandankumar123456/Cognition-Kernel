@@ -168,6 +168,44 @@ impl Store {
         Ok(())
     }
 
+    pub fn list_tasks(&self) -> rusqlite::Result<Vec<TaskRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, goal, status, plan_json, current_step, retry_budget_json, created_at, updated_at FROM tasks ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let status_str: String = row.get(2)?;
+            Ok(TaskRecord {
+                id: row.get(0)?,
+                goal: row.get(1)?,
+                status: TaskStatus::from_str(&status_str).unwrap_or(TaskStatus::Failed),
+                plan_json: row.get(3)?,
+                current_step: row.get(4)?,
+                retry_budget_json: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn recent_events(&self, limit: usize) -> rusqlite::Result<Vec<EventRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, event_type, payload_json, timestamp FROM events ORDER BY timestamp DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |row| {
+            Ok(EventRecord {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                event_type: row.get(2)?,
+                payload_json: row.get(3)?,
+                timestamp: row.get(4)?,
+            })
+        })?;
+        let mut events: Vec<EventRecord> = rows.collect::<rusqlite::Result<_>>()?;
+        events.reverse();
+        Ok(events)
+    }
+
     pub fn load_latest_checkpoint(&self, task_id: &str) -> rusqlite::Result<Option<CheckpointRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, state_blob, step_index, created_at FROM checkpoints WHERE task_id = ?1 ORDER BY created_at DESC LIMIT 1",

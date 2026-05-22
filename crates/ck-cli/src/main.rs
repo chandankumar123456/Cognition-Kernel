@@ -1,4 +1,5 @@
 mod commands;
+mod tui;
 
 use clap::Parser;
 
@@ -23,6 +24,8 @@ enum Commands {
     Cancel { task_id: String },
     /// Show event trace for a task
     Trace { task_id: String },
+    /// Live execution view (TUI)
+    Watch,
 }
 
 #[tokio::main]
@@ -35,5 +38,11 @@ async fn main() {
         Commands::Resume { .. } => println!("Resume requires daemon mode (not yet implemented)."),
         Commands::Cancel { .. } => println!("Cancel requires daemon mode (not yet implemented)."),
         Commands::Trace { task_id } => commands::cmd_trace(task_id),
+        Commands::Watch => {
+            let config = ck_kernel::config::KernelConfig::default();
+            if let Err(e) = crate::tui::run_watch(&config.db_path).await {
+                eprintln!("Watch error: {}", e);
+            }
+        }
     }
 }
