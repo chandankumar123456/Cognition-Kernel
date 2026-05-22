@@ -93,6 +93,24 @@ impl Task {
         }
     }
 
+    /// Create a task with a specific ID (for resume from checkpoint)
+    pub fn with_id(id: String, goal: String) -> Self {
+        let now = chrono::Utc::now().timestamp_millis();
+        Self {
+            id,
+            goal,
+            status: TaskStatus::Created,
+            plan: None,
+            current_step: 0,
+            retry_count: 0,
+            replan_count: 0,
+            created_at: now,
+            updated_at: now,
+            step_outputs: HashMap::new(),
+            last_failure: None,
+        }
+    }
+
     pub fn id(&self) -> &str { &self.id }
     pub fn goal(&self) -> &str { &self.goal }
     pub fn status(&self) -> TaskStatus { self.status }
@@ -134,6 +152,11 @@ impl Task {
         self.retry_count = 0;
     }
 
+    pub fn set_retry_state(&mut self, retry_count: u32, replan_count: u32) {
+        self.retry_count = retry_count;
+        self.replan_count = replan_count;
+    }
+
     pub fn current_plan_step(&self) -> Option<&PlanStep> {
         self.plan.as_ref()?.steps.get(self.current_step)
     }
@@ -145,7 +168,9 @@ impl Task {
         }
     }
 
-    /// Reset task to Planning state for replanning. Only valid from Recovering.
+    /// Force-reset task to Planning state for replanning.
+    /// This intentionally bypasses normal FSM transitions as part of recovery.
+    /// Only call from RecoveryDecision::Replan handler.
     pub fn start_replan(&mut self) {
         self.plan = None;
         self.current_step = 0;

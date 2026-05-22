@@ -147,10 +147,35 @@ impl Runtime {
             if last_health.elapsed() > tokio::time::Duration::from_secs(5) {
                 if let Some(sup) = &mut self.supervisor {
                     let restarted = sup.check_and_restart();
-                    for (wtype, _pid) in restarted {
+                    for (wtype, pid) in &restarted {
+                        println!("  [supervisor] {} restarted (PID {})", wtype.as_str(), pid);
                         match wtype {
-                            crate::supervisor::WorkerType::Cognition => { self.cognition_conn = None; }
-                            crate::supervisor::WorkerType::ToolWorker => { self.worker_conn = None; }
+                            crate::supervisor::WorkerType::Cognition => {
+                                self.cognition_conn = None;
+                                let server = PipeServer::new(&self.config.cognition_pipe);
+                                if let Ok(listener) = server.listen() {
+                                    match tokio::time::timeout(
+                                        tokio::time::Duration::from_secs(5),
+                                        listener.accept()
+                                    ).await {
+                                        Ok(Ok(conn)) => { self.cognition_conn = Some(conn); }
+                                        _ => { tracing::warn!("cognition reconnect failed"); }
+                                    }
+                                }
+                            }
+                            crate::supervisor::WorkerType::ToolWorker => {
+                                self.worker_conn = None;
+                                let server = PipeServer::new(&self.config.worker_pipe);
+                                if let Ok(listener) = server.listen() {
+                                    match tokio::time::timeout(
+                                        tokio::time::Duration::from_secs(5),
+                                        listener.accept()
+                                    ).await {
+                                        Ok(Ok(conn)) => { self.worker_conn = Some(conn); }
+                                        _ => { tracing::warn!("worker reconnect failed"); }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -218,7 +243,8 @@ impl Runtime {
             Ok(p) => p,
             Err(e) => { eprintln!("[resume] plan parse failed: {e}"); return; }
         };
-        let mut task = crate::task::Task::new(data.goal.clone());
+        let mut task = crate::task::Task::with_id(task_id.to_string(), data.goal.clone());
+        task.set_retry_state(data.retry_count, data.replan_count);
         let _ = task.transition_to(crate::task::TaskStatus::Planning);
         let _ = task.set_plan(plan); // -> Planned
         let _ = task.transition_to(crate::task::TaskStatus::Executing);
@@ -375,14 +401,27 @@ impl Runtime {
         let step = task.current_plan_step().cloned();
         let Some(step) = step else { return };
 
-        // Path sandbox: block absolute paths outside work_dir
+        // Path sandbox: block paths that escape work_dir
         let work_dir = std::path::Path::new(&self.config.work_dir);
         for (key, val) in &step.params {
             if key == "path" || key == "work_dir" {
                 if let Some(path_str) = val.as_str() {
                     let path = std::path::Path::new(path_str);
-                    if path.is_absolute() && !path.starts_with(work_dir) {
-                        eprintln!("  [sandbox] BLOCKED: '{}' is outside allowed dir '{}'",
+                    let resolved = if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        work_dir.join(path)
+                    };
+                    // Check if resolved path escapes work_dir
+                    // Use canonicalize if path exists, otherwise check for ..
+                    let is_safe = if let Ok(canon) = resolved.canonicalize() {
+                        canon.starts_with(work_dir)
+                    } else {
+                        // Path doesn't exist yet — check for .. components
+                        !path_str.contains("..")
+                    };
+                    if !is_safe {
+                        eprintln!("  [sandbox] BLOCKED: '{}' escapes allowed dir '{}'",
                             path_str, self.config.work_dir);
                         if let Some(task) = self.tasks.get_mut(task_id) {
                             let _ = task.transition_to(TaskStatus::Failed);
@@ -402,9 +441,10 @@ impl Runtime {
         });
 
         let Some(conn) = self.worker_conn.as_mut() else {
-            tracing::warn!(task_id = %task_id, "no worker connection, advancing step");
+            tracing::error!(task_id = %task_id, "no worker connection — failing task");
             if let Some(task) = self.tasks.get_mut(task_id) {
-                task.advance_step();
+                let _ = task.transition_to(TaskStatus::Failed);
+                let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Failed);
             }
             return;
         };

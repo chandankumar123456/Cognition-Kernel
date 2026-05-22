@@ -107,7 +107,7 @@ impl Store {
     }
 
     pub fn create_task(&self, id: &str, goal: &str) -> rusqlite::Result<()> {
-        let now = chrono::Utc::now().timestamp();
+        let now = chrono::Utc::now().timestamp_millis();
         self.conn.execute(
             "INSERT INTO tasks (id, goal, status, current_step, created_at, updated_at) VALUES (?1, ?2, ?3, 0, ?4, ?5)",
             params![id, goal, TaskStatus::Created.as_str(), now, now],
@@ -139,7 +139,7 @@ impl Store {
     }
 
     pub fn update_task_status(&self, id: &str, status: TaskStatus) -> rusqlite::Result<()> {
-        let now = chrono::Utc::now().timestamp();
+        let now = chrono::Utc::now().timestamp_millis();
         self.conn.execute(
             "UPDATE tasks SET status = ?1, updated_at = ?2 WHERE id = ?3",
             params![status.as_str(), now, id],
@@ -148,7 +148,7 @@ impl Store {
     }
 
     pub fn update_task_step(&self, id: &str, step: i64) -> rusqlite::Result<()> {
-        let now = chrono::Utc::now().timestamp();
+        let now = chrono::Utc::now().timestamp_millis();
         self.conn.execute(
             "UPDATE tasks SET current_step = ?1, updated_at = ?2 WHERE id = ?3",
             params![step, now, id],
@@ -157,7 +157,7 @@ impl Store {
     }
 
     pub fn update_task_plan(&self, id: &str, plan_json: &str) -> rusqlite::Result<()> {
-        let now = chrono::Utc::now().timestamp();
+        let now = chrono::Utc::now().timestamp_millis();
         self.conn.execute(
             "UPDATE tasks SET plan_json = ?1, updated_at = ?2 WHERE id = ?3",
             params![plan_json, now, id],
@@ -166,7 +166,7 @@ impl Store {
     }
 
     pub fn update_task_retry_budget(&self, id: &str, retry_count: u32, replan_count: u32) -> rusqlite::Result<()> {
-        let now = chrono::Utc::now().timestamp();
+        let now = chrono::Utc::now().timestamp_millis();
         let budget_json = format!(r#"{{"retry_count":{retry_count},"replan_count":{replan_count}}}"#);
         self.conn.execute(
             "UPDATE tasks SET retry_budget_json = ?1, updated_at = ?2 WHERE id = ?3",
@@ -176,7 +176,7 @@ impl Store {
     }
 
     pub fn mark_interrupted_tasks(&self) -> rusqlite::Result<u64> {
-        let now = chrono::Utc::now().timestamp();
+        let now = chrono::Utc::now().timestamp_millis();
         let count = self.conn.execute(
             "UPDATE tasks SET status = 'failed', updated_at = ?1 WHERE status IN ('planning', 'planned', 'executing', 'verifying', 'recovering')",
             params![now],
@@ -205,7 +205,7 @@ impl Store {
     }
 
     pub fn append_event(&self, task_id: &str, event_type: &str, payload_json: &str) -> rusqlite::Result<i64> {
-        let now = chrono::Utc::now().timestamp();
+        let now = chrono::Utc::now().timestamp_millis();
         self.conn.execute(
             "INSERT INTO events (task_id, event_type, payload_json, timestamp) VALUES (?1, ?2, ?3, ?4)",
             params![task_id, event_type, payload_json, now],
@@ -230,7 +230,7 @@ impl Store {
     }
 
     pub fn save_checkpoint(&self, id: &str, task_id: &str, state_blob: &[u8], step_index: i64) -> rusqlite::Result<()> {
-        let now = chrono::Utc::now().timestamp();
+        let now = chrono::Utc::now().timestamp_millis();
         self.conn.execute(
             "INSERT INTO checkpoints (id, task_id, state_blob, step_index, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, task_id, state_blob, step_index, now],
@@ -299,7 +299,7 @@ impl Store {
         &self, id: &str, task_id: &str, step_index: i64, tool: &str,
         params_json: &str, result_json: &str, success: bool, duration_ms: u64,
     ) -> rusqlite::Result<()> {
-        let now = chrono::Utc::now().timestamp();
+        let now = chrono::Utc::now().timestamp_millis();
         self.conn.execute(
             "INSERT INTO actions (id, task_id, step_index, tool, params_json, result_json, success, duration_ms, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",

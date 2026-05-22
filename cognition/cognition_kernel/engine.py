@@ -30,7 +30,7 @@ def response_to_dict(resp: CognitionResponse) -> dict:
 
 async def handle_request(request: CognitionRequest) -> CognitionResponse:
     try:
-        if request.request_type == "plan":
+        if request.request_type in ("plan", "replan"):
             steps = await generate_plan(request)
             return CognitionResponse(
                 task_id=request.task_id,

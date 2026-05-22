@@ -188,7 +188,7 @@ pub fn cmd_trace(task_id: String) {
         Ok(events) => {
             println!("Events ({}):", events.len());
             for ev in &events {
-                let ts = chrono::DateTime::from_timestamp(ev.timestamp, 0)
+                let ts = chrono::DateTime::from_timestamp_millis(ev.timestamp)
                     .map(|dt: chrono::DateTime<chrono::Utc>| dt.format("%H:%M:%S").to_string())
                     .unwrap_or_else(|| ev.timestamp.to_string());
                 let summary = summarize_event(&ev.event_type, &ev.payload_json);
@@ -279,7 +279,8 @@ pub async fn cmd_daemon() {
         Ok(child) => println!("Daemon started (PID {}).\nUse `ck start \"<goal>\"` to send tasks.\nUse `ck stop` to shut down.", child.id()),
         Err(e) => eprintln!("Failed to start daemon: {e}\nTry: cargo build -p ck-kernel first"),
     }
-    // Note: supervisor is dropped here (workers outlive it since they're independent processes)
+    // Detach workers so they aren't killed when supervisor is dropped
+    supervisor.detach_all();
 }
 
 pub async fn cmd_stop() {

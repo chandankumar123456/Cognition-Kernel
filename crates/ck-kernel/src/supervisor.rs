@@ -127,6 +127,11 @@ impl Supervisor {
         }
         self.workers.clear();
     }
+
+    /// Detach all workers so they aren't killed when Supervisor is dropped.
+    pub fn detach_all(&mut self) {
+        self.workers.clear();
+    }
 }
 
 impl Drop for Supervisor {

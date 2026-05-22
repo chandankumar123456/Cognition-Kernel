@@ -55,8 +55,9 @@ func main() {
 func dispatch(req *protocol.ExecutionRequest) *protocol.ExecutionResponse {
 	start := time.Now()
 	resp := &protocol.ExecutionResponse{
-		TaskID:   req.TaskID,
-		ActionID: req.ActionID,
+		TaskID:      req.TaskID,
+		ActionID:    req.ActionID,
+		SideEffects: []string{},
 	}
 
 	switch req.Tool {
