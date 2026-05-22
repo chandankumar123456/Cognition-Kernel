@@ -538,11 +538,15 @@ class PlanStep:
 
 **LLM abstraction:** LiteLLM is used as the provider layer. Switch models by changing the `model` parameter — OpenAI, Anthropic, Gemini, and local models (Ollama) are all supported without code changes.
 
+**Windows IPC:** Uses `pywin32` (`win32file.CreateFile` + `win32file.ReadFile/WriteFile`) to open Named Pipes as file handles, wrapped in `asyncio.run_in_executor` for non-blocking I/O.
+
 **Startup:**
 
 ```bash
 python -m cognition_kernel.engine --pipe \\.\pipe\ck-cognition
 ```
+
+> In normal use, `ck start` spawns this process automatically. Manual startup is only needed for development.
 
 ---
 
@@ -583,6 +587,8 @@ Uses `os/exec` with `context.WithTimeout`. On Windows: `cmd /C <command>`. On Li
 ./ck-worker --pipe \\.\pipe\ck-worker
 ```
 
+> In normal use, `ck start` spawns this process automatically and builds the binary if needed.
+
 ---
 
 ### CLI
@@ -592,6 +598,21 @@ Uses `os/exec` with `context.WithTimeout`. On Windows: `cmd /C <command>`. On Li
 The CLI is a thin adapter — it creates a `Runtime` instance and sends commands through the `mpsc` channel. It owns no business logic.
 
 **Implementation note:** In the current V1, `ck start` runs the kernel inline (blocking the terminal). A future daemon mode will allow the kernel to run as a background process and all CLI commands will communicate with it via IPC.
+
+---
+
+### TUI — `ck watch`
+
+**Crate:** `ck-cli` | **File:** `src/tui.rs`
+
+A live ratatui terminal view that polls SQLite every 500ms and renders two panels:
+
+- **Top — Tasks table:** ID (first 8 chars), Goal (truncated), Status (color-coded), Step index
+- **Bottom — Event stream:** Last 20 events in chronological order with timestamp and task ID
+
+Status colors: `Executing` = cyan, `Completed` = green, `Failed` = red, `Escalated` = yellow.
+
+Press `q` or `Ctrl+C` to exit. Reads directly from the SQLite database — no extra IPC connection required.
 
 
 ---
@@ -765,6 +786,7 @@ pub struct KernelConfig {
 - **Rust** 1.75+ with cargo
 - **Python** 3.12+ with `uv` or `pip`
 - **Go** 1.22+
+- **pywin32** — Windows Named Pipe support for Python (`pip install pywin32`)
 
 ### Rust workspace
 
@@ -826,20 +848,28 @@ go build -o bin/ck-worker.exe ./cmd/ck-worker
 
 ### Starting the full system
 
-Launch each component in a separate terminal:
+All components start automatically with a single command:
 
 ```bash
-# Terminal 1 — Kernel + CLI
-cargo run -p ck-kernel
+# Set your LLM API key
+export OPENAI_API_KEY=sk-...          # or ANTHROPIC_API_KEY, etc.
 
-# Terminal 2 — Cognition engine
-cd cognition && python -m cognition_kernel.engine --pipe \\.\pipe\ck-cognition
+# Start — spawns Go worker + Python cognition, then runs kernel
+cargo run -p ck-cli -- start "create a file called hello.txt with the content hello world"
+```
 
-# Terminal 3 — Tool workers
-cd workers && go run ./cmd/ck-worker --pipe \\.\pipe\ck-worker
+`ck start` automatically:
+1. Builds the Go worker binary if it doesn't exist yet (`workers/bin/ck-worker.exe`)
+2. Spawns the Go tool worker process
+3. Spawns the Python cognition engine process
+4. Connects the kernel to both via Named Pipes
+5. Creates and runs the task to completion
+6. Kills worker processes on exit
 
-# Terminal 4 — Send a task
-cargo run -p ck-cli -- start "create a file called hello.txt with the content 'hello world'"
+**Optional — live TUI view (second terminal):**
+
+```bash
+cargo run -p ck-cli -- watch
 ```
 
 ---
@@ -915,10 +945,11 @@ ck <command> [args]
 
 | Command | Description |
 |---------|-------------|
-| `ck start "<goal>"` | Create a task from a natural language goal and start the runtime |
+| `ck start "<goal>"` | Create a task from a natural language goal and start the runtime (auto-spawns workers) |
 | `ck status` | List all tasks and their current status |
 | `ck status <task_id>` | Show detailed state for a specific task |
 | `ck trace <task_id>` | Print the full event log for a task (timestamped) |
+| `ck watch` | Open live TUI — real-time task table and event stream |
 | `ck pause <task_id>` | Pause a running task (saves checkpoint) |
 | `ck resume <task_id>` | Resume a paused task from its last checkpoint |
 | `ck cancel <task_id>` | Cancel a task and mark it as Failed |
@@ -926,11 +957,14 @@ ck <command> [args]
 **Examples:**
 
 ```bash
-# Start a simple task
+# Start a task (workers auto-spawned)
 ck start "create a Python script at ~/scripts/backup.py that zips the Desktop folder"
 
 # Check what's running
 ck status
+
+# Live TUI view
+ck watch
 
 # View execution trace
 ck trace 01HX1ABCDEF2345678GHJKM
@@ -960,14 +994,18 @@ ck resume 01HX1ABCDEF2345678GHJKM
 - [x] Worker supervisor (spawn, health check, auto-restart)
 - [x] Go tool workers — shell (cross-platform, timeout) + filesystem (atomic writes)
 - [x] Python cognition engine — LiteLLM planning, replan, reflection, IPC loop
-- [x] CLI — start, status, trace, pause, resume, cancel
+- [x] End-to-end IPC wiring — kernel ↔ cognition ↔ workers over Named Pipes
+- [x] Event persistence — all events written to SQLite for full replay
+- [x] Replan flow — `Task::start_replan()` resets FSM cleanly on recovery
+- [x] CLI — start, status, trace, watch, pause, resume, cancel
+- [x] `ck watch` — ratatui live TUI (task table + event stream)
+- [x] Single command startup — `ck start` auto-spawns all workers
+- [x] Windows Named Pipe IPC — Go (go-winio), Python (pywin32 win32file), Rust (tokio)
 - [x] 38 tests across all layers
 
 **V2 — Planned**
 
-- [ ] Wire IPC end-to-end (kernel ↔ cognition ↔ workers in a single `ck start` command)
 - [ ] Daemon mode (kernel runs in background, CLI communicates via IPC)
-- [ ] `ck watch` — ratatui live execution view
 - [ ] Browser tool worker (Playwright)
 - [ ] Desktop tool worker (screen capture, input simulation)
 - [ ] Long-term memory (vector search for task history)
