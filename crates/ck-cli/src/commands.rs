@@ -5,6 +5,9 @@ use ck_memory::store::Store;
 use tokio::sync::mpsc;
 
 pub async fn cmd_start(goal: String) {
+    // TODO: If daemon is running (\\.\pipe\ck-control exists), route the task
+    // to it via control pipe instead of launching inline. For now, always run inline.
+
     let config = KernelConfig::default();
 
     // Build Go worker binary if it doesn't exist yet
@@ -231,4 +234,57 @@ fn summarize_event(event_type: &str, payload_json: &str) -> String {
         "TaskFailed" => format!("FAIL {}", inner["reason"].as_str().unwrap_or("")),
         _ => String::new(),
     }
+}
+
+
+pub async fn cmd_daemon() {
+    let config = KernelConfig::default();
+
+    // Build Go worker if needed
+    let worker_bin = std::path::Path::new(&config.worker_bin);
+    if !worker_bin.exists() {
+        println!("Building Go worker...");
+        let _ = std::process::Command::new("go")
+            .args(["build", "-o", &config.worker_bin, "./cmd/ck-worker"])
+            .current_dir("workers")
+            .status();
+    }
+
+    let pipe_prefix = r"\\.\pipe\";
+    let cognition_pipe_path = format!("{}{}", pipe_prefix, config.cognition_pipe);
+    let worker_pipe_path = format!("{}{}", pipe_prefix, config.worker_pipe);
+
+    // Spawn workers
+    let mut supervisor = Supervisor::new("ck");
+    print!("Starting workers... ");
+    let _ = supervisor.spawn_tool_worker(&config.worker_bin, &worker_pipe_path);
+    let cognition_dir = std::path::Path::new(&config.cognition_script)
+        .parent().and_then(|p| p.parent())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "cognition".into());
+    let _ = supervisor.spawn_cognition_module(&config.python_bin, &cognition_dir, &cognition_pipe_path);
+    println!("done.");
+
+    // Find the kernel binary (same dir as this CLI binary)
+    let kernel_bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("ck-kernel.exe")))
+        .unwrap_or_else(|| std::path::PathBuf::from("ck-kernel.exe"));
+
+    // Launch kernel in daemon mode
+    match std::process::Command::new(&kernel_bin)
+        .arg("--daemon")
+        .spawn()
+    {
+        Ok(child) => println!("Daemon started (PID {}).\nUse `ck start \"<goal>\"` to send tasks.\nUse `ck stop` to shut down.", child.id()),
+        Err(e) => eprintln!("Failed to start daemon: {e}\nTry: cargo build -p ck-kernel first"),
+    }
+    // Note: supervisor is dropped here (workers outlive it since they're independent processes)
+}
+
+pub async fn cmd_stop() {
+    println!("Stopping daemon...");
+    // TODO: implement proper control pipe client — connect to \\.\pipe\ck-control
+    // and send {"cmd": "shutdown"} via MessagePack framing
+    println!("Send Ctrl+C to the daemon process, or use: taskkill /F /IM ck-kernel.exe");
 }

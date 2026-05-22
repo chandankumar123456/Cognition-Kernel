@@ -26,6 +26,10 @@ enum Commands {
     Trace { task_id: String },
     /// Live execution view (TUI)
     Watch,
+    /// Run the kernel as a background daemon (workers auto-spawned)
+    Daemon,
+    /// Stop the running daemon
+    Stop,
 }
 
 #[tokio::main]
@@ -44,5 +48,7 @@ async fn main() {
                 eprintln!("Watch error: {}", e);
             }
         }
+        Commands::Daemon => commands::cmd_daemon().await,
+        Commands::Stop => commands::cmd_stop().await,
     }
 }
