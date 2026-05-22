@@ -15,3 +15,6 @@ workers/bin/
 
 C:/cargo-targets/
 hello.txt
+
+adaptive-test.txt
+echo_test.sh
