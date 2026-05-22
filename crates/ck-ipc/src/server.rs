@@ -21,7 +21,7 @@ impl PipeServer {
     /// listener that can be awaited separately from spawning workers.
     pub fn listen(&self) -> Result<PipeListener, ProtocolError> {
         let server = ServerOptions::new()
-            .first_pipe_instance(true)
+            .first_pipe_instance(false)
             .create(&self.pipe_name)?;
         Ok(PipeListener { server })
     }

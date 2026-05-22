@@ -145,8 +145,8 @@ impl Runtime {
             // Remove terminal tasks
             self.tasks.retain(|_, t| !matches!(t.status(), TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Escalated));
 
-            // Auto-shutdown when all tasks done and command channel closed
-            if self.tasks.is_empty() && channel_closed {
+            // Auto-shutdown: only when all tasks are done AND channel is closed
+            if channel_closed && self.tasks.is_empty() {
                 tracing::info!("all tasks complete and command channel closed, shutting down");
                 return;
             }

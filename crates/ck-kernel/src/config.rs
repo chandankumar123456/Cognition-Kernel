@@ -38,7 +38,13 @@ impl Default for KernelConfig {
                 .join("engine.py")
                 .to_string_lossy()
                 .into(),
-            python_bin: "python".into(),
+            python_bin: project_root
+                .join("cognition")
+                .join(".venv")
+                .join("Scripts")
+                .join("python.exe")
+                .to_string_lossy()
+                .into(),
             worker_bin: project_root
                 .join("workers")
                 .join("bin")
