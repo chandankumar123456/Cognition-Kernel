@@ -1,0 +1,12 @@
+target/
+Cargo.lock
+__pycache__/
+*.pyc
+.venv/
+cognition/.venv/
+workers/bin/
+*.db
+*.db-wal
+*.db-shm
+.idea/
+.vscode/
