@@ -5,6 +5,7 @@ requires-python = ">=3.11"
 dependencies = [
     "litellm>=1.40.0",
     "msgpack>=1.0.0",
+    "pywin32>=306; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

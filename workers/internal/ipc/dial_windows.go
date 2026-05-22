@@ -2,8 +2,12 @@
 
 package ipc
 
-import "net"
+import (
+	"net"
+
+	"github.com/Microsoft/go-winio"
+)
 
 func dial(pipePath string) (net.Conn, error) {
-	return net.Dial("tcp", pipePath)
+	return winio.DialPipe(pipePath, nil)
 }
