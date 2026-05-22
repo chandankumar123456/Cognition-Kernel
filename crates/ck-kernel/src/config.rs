@@ -16,6 +16,8 @@ pub struct KernelConfig {
     pub python_bin: String,
     /// Path to Go worker binary (default: auto-detected)
     pub worker_bin: String,
+    /// Working directory for task execution (sandbox path)
+    pub work_dir: String,
 }
 
 impl Default for KernelConfig {
@@ -49,6 +51,10 @@ impl Default for KernelConfig {
                 .join("workers")
                 .join("bin")
                 .join(if cfg!(windows) { "ck-worker.exe" } else { "ck-worker" })
+                .to_string_lossy()
+                .into(),
+            work_dir: std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
                 .to_string_lossy()
                 .into(),
         }
