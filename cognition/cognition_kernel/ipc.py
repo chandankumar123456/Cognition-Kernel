@@ -19,55 +19,36 @@ class PipeClient:
             self._reader, self._writer = await asyncio.open_unix_connection(self._path)
 
     async def _connect_windows(self):
-        """Connect to a Windows Named Pipe using ProactorEventLoop's pipe support."""
+        import time
+        import win32file
+        import win32pipe
+        import pywintypes
+
         loop = asyncio.get_event_loop()
+        deadline = time.monotonic() + 10.0  # 10 second total timeout
 
-        # ProactorEventLoop on Windows supports create_pipe_connection
-        # which is the correct way to connect to a named pipe.
-        import io
+        def _connect():
+            while time.monotonic() < deadline:
+                try:
+                    # Wait for pipe to exist (500ms timeout per attempt)
+                    win32pipe.WaitNamedPipe(self._path, 500)
+                    # Pipe exists — open it
+                    handle = win32file.CreateFile(
+                        self._path,
+                        win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                        0, None,
+                        win32file.OPEN_EXISTING,
+                        0, None
+                    )
+                    return handle
+                except pywintypes.error as e:
+                    if e.args[0] == 2:  # ERROR_FILE_NOT_FOUND — pipe doesn't exist yet
+                        time.sleep(0.1)
+                        continue
+                    raise  # any other error is fatal
+            raise TimeoutError(f"Timed out waiting for pipe: {self._path}")
 
-        class _PipeStream:
-            """Wrap a synchronous pipe handle for async I/O via executor."""
-            def __init__(self, handle):
-                self._handle = handle
-
-            def read(self, n):
-                import win32file
-                _, data = win32file.ReadFile(self._handle, n)
-                return data
-
-            def write(self, data):
-                import win32file
-                win32file.WriteFile(self._handle, data)
-
-            def close(self):
-                import win32file
-                win32file.CloseHandle(self._handle)
-
-        # Use win32file to open the named pipe
-        try:
-            import win32file
-            import win32pipe
-            import pywintypes
-
-            # Wait for pipe to be available (up to 5s)
-            win32pipe.WaitNamedPipe(self._path, 5000)
-            handle = win32file.CreateFile(
-                self._path,
-                win32file.GENERIC_READ | win32file.GENERIC_WRITE,
-                0, None,
-                win32file.OPEN_EXISTING,
-                0, None
-            )
-            self._win_handle = handle
-            self._loop = loop
-
-        except ImportError:
-            # pywin32 not available — fall back to open() which works on
-            # Windows named pipes as regular files
-            self._win_handle = None
-            # Try raw open as file (works for some pipe configurations)
-            self._file = open(self._path, "r+b", buffering=0)
+        self._win_handle = await loop.run_in_executor(None, _connect)
 
     async def read_message(self) -> dict:
         if sys.platform == "win32":
@@ -91,46 +72,31 @@ class PipeClient:
 
     async def _win_read_exact(self, n: int) -> bytes:
         loop = asyncio.get_event_loop()
-        if hasattr(self, "_win_handle") and self._win_handle is not None:
-            def _read():
-                import win32file
-                buf = b""
-                while len(buf) < n:
-                    _, chunk = win32file.ReadFile(self._win_handle, n - len(buf))
-                    buf += chunk
-                return buf
-            return await loop.run_in_executor(None, _read)
-        else:
-            def _read():
-                buf = b""
-                while len(buf) < n:
-                    chunk = self._file.read(n - len(buf))
-                    if not chunk:
-                        raise ConnectionError("pipe closed")
-                    buf += chunk
-                return buf
-            return await loop.run_in_executor(None, _read)
+
+        def _read():
+            import win32file
+            buf = b""
+            while len(buf) < n:
+                _, chunk = win32file.ReadFile(self._win_handle, n - len(buf))
+                buf += chunk
+            return buf
+
+        return await loop.run_in_executor(None, _read)
 
     async def _win_write(self, data: bytes):
         loop = asyncio.get_event_loop()
-        if hasattr(self, "_win_handle") and self._win_handle is not None:
-            def _write():
-                import win32file
-                win32file.WriteFile(self._win_handle, data)
-            await loop.run_in_executor(None, _write)
-        else:
-            def _write():
-                self._file.write(data)
-                self._file.flush()
-            await loop.run_in_executor(None, _write)
+
+        def _write():
+            import win32file
+            win32file.WriteFile(self._win_handle, data)
+
+        await loop.run_in_executor(None, _write)
 
     async def close(self):
         if sys.platform == "win32":
             if hasattr(self, "_win_handle") and self._win_handle is not None:
                 import win32file
                 win32file.CloseHandle(self._win_handle)
-            elif hasattr(self, "_file"):
-                self._file.close()
         else:
             if self._writer:
                 self._writer.close()
