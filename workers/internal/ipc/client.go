@@ -48,7 +48,7 @@ func (c *Client) WriteResponse(resp *protocol.ExecutionResponse) error {
 
 func readFrame(r io.Reader) ([]byte, error) {
 	var length uint32
-	if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
+	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
 		return nil, err
 	}
 	buf := make([]byte, length)
@@ -59,7 +59,7 @@ func readFrame(r io.Reader) ([]byte, error) {
 }
 
 func writeFrame(w io.Writer, data []byte) error {
-	if err := binary.Write(w, binary.LittleEndian, uint32(len(data))); err != nil {
+	if err := binary.Write(w, binary.BigEndian, uint32(len(data))); err != nil {
 		return err
 	}
 	_, err := w.Write(data)
