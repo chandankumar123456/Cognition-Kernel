@@ -74,14 +74,14 @@ impl Runtime {
             tokio::time::timeout(timeout, wrk_listener.accept()),
         );
         match cog_result {
-            Ok(Ok(conn)) => { tracing::info!("cognition connected"); self.cognition_conn = Some(conn); }
-            Ok(Err(e)) => tracing::warn!("cognition connect failed: {e}"),
-            Err(_) => tracing::warn!("cognition connect timed out"),
+            Ok(Ok(conn)) => { println!("  [kernel] cognition engine connected"); self.cognition_conn = Some(conn); }
+            Ok(Err(e)) => println!("  [kernel] cognition connect ERROR: {e}"),
+            Err(_) => println!("  [kernel] cognition connect TIMED OUT"),
         }
         match wrk_result {
-            Ok(Ok(conn)) => { tracing::info!("worker connected"); self.worker_conn = Some(conn); }
-            Ok(Err(e)) => tracing::warn!("worker connect failed: {e}"),
-            Err(_) => tracing::warn!("worker connect timed out"),
+            Ok(Ok(conn)) => { println!("  [kernel] tool worker connected"); self.worker_conn = Some(conn); }
+            Ok(Err(e)) => println!("  [kernel] worker connect ERROR: {e}"),
+            Err(_) => println!("  [kernel] worker connect TIMED OUT"),
         }
     }
 
@@ -244,6 +244,15 @@ impl Runtime {
                 return;
             }
         };
+
+        if response.response_type == "error" {
+            eprintln!("  [cognition] planning error: {}", response.reasoning);
+            if let Some(task) = self.tasks.get_mut(task_id) {
+                let _ = task.transition_to(TaskStatus::Failed);
+                let _ = self.store.update_task_status(task_id, ck_memory::store::TaskStatus::Failed);
+            }
+            return;
+        }
 
         if let Some(ipc_steps) = response.plan {
             let steps: Vec<PlanStep> = ipc_steps.iter().map(ipc_step_to_plan_step).collect();

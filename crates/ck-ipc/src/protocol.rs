@@ -15,7 +15,7 @@ pub enum ProtocolError {
 
 /// Encode a message with 4-byte big-endian length prefix + msgpack payload.
 pub fn encode_message<T: Serialize>(msg: &T) -> Result<Vec<u8>, ProtocolError> {
-    let payload = rmp_serde::to_vec(msg)?;
+    let payload = rmp_serde::to_vec_named(msg)?;
     let len = payload.len() as u32;
     let mut buf = Vec::with_capacity(4 + payload.len());
     buf.extend_from_slice(&len.to_be_bytes());
@@ -53,7 +53,7 @@ pub async fn write_message<T: Serialize>(
     writer: &mut (impl AsyncWriteExt + Unpin),
     msg: &T,
 ) -> Result<(), ProtocolError> {
-    let payload = rmp_serde::to_vec(msg)?;
+    let payload = rmp_serde::to_vec_named(msg)?;
     let len = (payload.len() as u32).to_be_bytes();
     writer.write_all(&len).await?;
     writer.write_all(&payload).await?;

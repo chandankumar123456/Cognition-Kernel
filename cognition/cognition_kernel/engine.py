@@ -29,25 +29,34 @@ def response_to_dict(resp: CognitionResponse) -> dict:
 
 
 async def handle_request(request: CognitionRequest) -> CognitionResponse:
-    if request.request_type == "plan":
-        steps = await generate_plan(request)
-        return CognitionResponse(
-            task_id=request.task_id,
-            response_type="plan",
-            plan=[asdict(s) for s in steps],
-        )
-    elif request.request_type == "reflect":
-        reasoning = await reflect(request)
-        return CognitionResponse(
-            task_id=request.task_id,
-            response_type="reflection",
-            reasoning=reasoning,
-        )
-    else:
+    try:
+        if request.request_type == "plan":
+            steps = await generate_plan(request)
+            return CognitionResponse(
+                task_id=request.task_id,
+                response_type="plan",
+                plan=[asdict(s) for s in steps],
+            )
+        elif request.request_type == "reflect":
+            reasoning = await reflect(request)
+            return CognitionResponse(
+                task_id=request.task_id,
+                response_type="reflection",
+                reasoning=reasoning,
+            )
+        else:
+            return CognitionResponse(
+                task_id=request.task_id,
+                response_type="error",
+                reasoning=f"Unknown request_type: {request.request_type}",
+            )
+    except Exception as e:
+        print(f"[cognition] ERROR handling {request.request_type}: {e}", flush=True)
         return CognitionResponse(
             task_id=request.task_id,
             response_type="error",
-            reasoning=f"Unknown request_type: {request.request_type}",
+            plan=None,
+            reasoning=f"cognition error: {e}",
         )
 
 
