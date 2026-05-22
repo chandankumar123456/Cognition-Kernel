@@ -1,12 +1,48 @@
 use ck_kernel::config::KernelConfig;
 use ck_kernel::runtime::{Runtime, RuntimeCommand};
+use ck_kernel::supervisor::Supervisor;
 use ck_memory::store::Store;
 use tokio::sync::mpsc;
 
 pub async fn cmd_start(goal: String) {
     let config = KernelConfig::default();
-    let (cmd_tx, cmd_rx) = mpsc::channel(16);
 
+    // Build Go worker binary if it doesn't exist yet
+    let worker_bin = std::path::Path::new(&config.worker_bin);
+    if !worker_bin.exists() {
+        println!("Building Go worker...");
+        let status = std::process::Command::new("go")
+            .args(["build", "-o", &config.worker_bin, "./cmd/ck-worker"])
+            .current_dir("workers")
+            .status();
+        match status {
+            Ok(s) if s.success() => println!("Worker built."),
+            Ok(s) => { eprintln!("go build failed: exit {s}"); return; }
+            Err(e) => { eprintln!("go build error: {e}"); return; }
+        }
+    }
+
+    let pipe_prefix = r"\\.\pipe\";
+    let cognition_pipe_path = format!("{}{}", pipe_prefix, config.cognition_pipe);
+    let worker_pipe_path = format!("{}{}", pipe_prefix, config.worker_pipe);
+
+    // Spawn workers
+    let mut supervisor = Supervisor::new("ck");
+    println!("Spawning Go worker...");
+    match supervisor.spawn_tool_worker(&config.worker_bin, &worker_pipe_path) {
+        Ok(pid) => println!("  Worker PID: {pid}"),
+        Err(e) => { eprintln!("Failed to spawn worker: {e}"); return; }
+    }
+    println!("Spawning Python cognition...");
+    match supervisor.spawn_cognition(&config.python_bin, &config.cognition_script, &cognition_pipe_path) {
+        Ok(pid) => println!("  Cognition PID: {pid}"),
+        Err(e) => { eprintln!("Failed to spawn cognition: {e}"); return; }
+    }
+
+    // Give workers a moment to start before the kernel tries to connect
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(16);
     let mut runtime = match Runtime::new(config.clone(), cmd_rx) {
         Ok(r) => r,
         Err(e) => { eprintln!("Failed to create runtime: {e}"); return; }
@@ -21,6 +57,7 @@ pub async fn cmd_start(goal: String) {
 
     runtime.run().await;
     println!("Done.");
+    // supervisor dropped here — kills spawned workers on exit
 }
 
 pub fn cmd_status(task_id: Option<String>) {
